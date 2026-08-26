@@ -3,22 +3,17 @@ set -euo pipefail
 
 echo "=== E2E Test: Saved HL7 Connection ==="
 
-WIREMOCK_URL="${WIREMOCK_URL:-http://localhost:8080}"
-BRIDGE_URL="${BRIDGE_URL:-http://localhost:8443}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/test-support.sh"
 BRIDGE_MLLP_PORT="${BRIDGE_MLLP_PORT:-2575}"
 : "${BRIDGE_CONNECTION_ID:?Activate a saved HL7 server connection and set BRIDGE_CONNECTION_ID first}"
-BRIDGE_AUTH=()
-if [ -n "${BRIDGE_PASSWORD:-}" ]; then
-    BRIDGE_AUTH=(-u "${BRIDGE_USERNAME:-bridge}:${BRIDGE_PASSWORD}")
-fi
-
-CONNECTION=$(curl --fail --silent --show-error "${BRIDGE_AUTH[@]}" "${BRIDGE_URL}/api/connections/${BRIDGE_CONNECTION_ID}")
+CONNECTION=$(bridge_api "${BRIDGE_API_URL}/connections/${BRIDGE_CONNECTION_ID}")
 echo "${CONNECTION}" | jq -e --argjson port "${BRIDGE_MLLP_PORT}" '
   .actualRuntimeState == "ACTIVE" and
   .activeRuntimeRef.configRevision == .configRevision and
   any(.fields[]; .key == "port" and .currentValue == $port)
 ' > /dev/null
-ANALYZER_ID=$(echo "${CONNECTION}" | jq -er '.clientAnalyzerId')
+PROFILE_ID=$(echo "${CONNECTION}" | jq -er '.profileRef.profileId')
 
 # Use a unique message so the test need not delete another test's request log.
 MESSAGE_ID="saved-hl7-$(date +%s)-$$"
@@ -30,12 +25,5 @@ if [[ "${ACK}" != *"MSA|AA|${MESSAGE_ID}"* ]]; then
 fi
 
 # The ACK follows forwarding, so no fixed processing delay is needed.
-REQUESTS=$(curl --fail --silent --show-error "${WIREMOCK_URL}/__admin/requests")
-echo "${REQUESTS}" | jq -e --arg source "connection:${BRIDGE_CONNECTION_ID}" \
-  --arg analyzer "${ANALYZER_ID}" --arg message "${MESSAGE_ID}" '
-  any(.requests[];
-    (.request.headers["X-Source-Id"] == $source) and
-    (.request.headers["X-Analyzer-Id"] == $analyzer) and
-    (.request.body | contains($message)))
-' > /dev/null
+assert_normalized_capture "${BRIDGE_CONNECTION_ID}" "${PROFILE_ID}" "TEST" "MLLP"
 echo "PASS: saved connection identity delivered through its own HL7 listener"
