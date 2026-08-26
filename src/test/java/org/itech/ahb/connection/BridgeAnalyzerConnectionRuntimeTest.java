@@ -54,6 +54,9 @@ class BridgeAnalyzerConnectionRuntimeTest {
       .orElseThrow();
     assertThat(entry.getExpectedProtocol()).isEqualTo("FILE");
     assertThat(entry.getFileDirectory()).isEqualTo(directory.toString());
+    assertThat(entry.getBridgeConnectionId()).isEqualTo("00000000-0000-0000-0000-000000000042");
+    assertThat(entry.getProfileId()).isEqualTo(profile.path("profileMeta").path("id").asText());
+    assertThat(entry.getProfileRevision()).isEqualTo(profile.path("catalog").path("revision").asInt());
     assertThat(entry.getColumnMappings())
       .containsEntry("Sample ID", "sampleId")
       .containsEntry("TargetName", "testCode")
