@@ -295,6 +295,9 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     entry.setScannerSynonyms(scannerSynonyms);
     entry.setFileTestCode(fileTestCode(entry.getExpectedProtocol(), profile, primaryCodes, entry.getColumnMappings()));
     entry.setControlResultRecognition(ControlResultRecognition.fromProfile(profile.path("controlResultRecognition")));
+    entry.setRecognitionFingerprint(
+      requiredText(profile.path("catalog"), "recognitionFingerprint", "Recognition fingerprint")
+    );
     return entry;
   }
 

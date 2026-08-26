@@ -4,7 +4,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.regex.Pattern;
 import lombok.extern.slf4j.Slf4j;
 import org.itech.ahb.fhir.FhirBundleBuilder.AnalyzerResult;
@@ -61,10 +60,11 @@ public class HL7ResultParser {
                 AnalyzerResult result = parseObxSegment(line, delimiters);
                 if (result != null) {
                     String specimenId = actualAccession(accession, fieldValues, delimiters);
-                    Optional<ControlRecognitionRule> matchedRule =
-                            ControlResultRecognitionEvaluator.findMatchingRule(recognition, specimenId, fieldValues);
-                    if (matchedRule.isPresent()) {
-                        ControlRecognitionRule rule = matchedRule.get();
+                    ControlResultRecognitionEvaluator.Assessment assessment =
+                            ControlResultRecognitionEvaluator.evaluate(recognition, specimenId, fieldValues);
+                    result = result.withControlRecognition(assessment);
+                    if (assessment.matchedRule().isPresent()) {
+                        ControlRecognitionRule rule = assessment.matchedRule().orElseThrow();
                         result = result.withControl(true)
                                 .withControlLevel(rule.controlLevel())
                                 .withControlType(rule.controlType());
