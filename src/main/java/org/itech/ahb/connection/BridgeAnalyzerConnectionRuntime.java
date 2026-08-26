@@ -261,6 +261,8 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     if ("TCP/IP".equals(nullableText(values, "transport")) && "CLIENT".equals(nullableText(values, "connectionRole"))) {
       entry.setInboundSourceId(requiredText(values, "host", "Analyzer host"));
     }
+    entry.setOutboundHost(nullableText(values, "host"));
+    entry.setOutboundPort(values.path("port").asInt(0));
     entry.setIdentifierPattern(nullableText(profile, "identifier_pattern"));
     entry.setFilePattern(nullableText(values, "filePattern"));
     entry.setColumnMappings(textMap(profile.path("column_mapping")));
