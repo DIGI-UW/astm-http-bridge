@@ -3,6 +3,7 @@ package org.itech.ahb.profile;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.SoftAssertions.assertSoftly;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.file.Path;
@@ -79,7 +80,7 @@ class ShippedProfileCatalogTest {
       .allSatisfy(revision -> {
         ObjectNode profile = revision.profile();
         assertThat(profile.path("catalog").path("source").asText()).isEqualTo("SHIPPED");
-        assertThat(profile.path("catalog").path("revision").asInt()).isEqualTo(2);
+        assertThat(profile.path("catalog").path("revision").asInt()).isEqualTo(3);
         assertThat(profile.path("configDefaults").has("qcRules")).isFalse();
         assertThat(profile.path("configDefaults").path("dataFlow").asText()).isEqualTo("RESULTS_ONLY");
 
@@ -95,6 +96,28 @@ class ShippedProfileCatalogTest {
           assertThat(choices).contains("TWO_WAY");
         } else {
           assertThat(choices).doesNotContain("TWO_WAY");
+        }
+
+        switch (profile.path("profileMeta").path("id").asText()) {
+          case "fluorocycler-xt" ->
+            assertThat(profile.path("result_value_order")).extracting(JsonNode::asText).containsExactly(
+              "result",
+              "interpretation"
+            );
+          case "genexpert-astm" -> {
+            JsonNode selection = profile
+              .path("configDefaults")
+              .path("extractionOverrides")
+              .path("resultRecordSelection");
+            assertThat(selection.path("mode").asText()).isEqualTo("FIELD_NON_BLANK");
+            assertThat(selection.path("targetField").asText()).isEqualTo("R.3.5");
+          }
+          case "quantstudio" ->
+            assertThat(profile.path("result_value_order")).extracting(JsonNode::asText).containsExactly(
+              "result",
+              "ctValue"
+            );
+          default -> throw new AssertionError("Unexpected priority profile");
         }
       });
 

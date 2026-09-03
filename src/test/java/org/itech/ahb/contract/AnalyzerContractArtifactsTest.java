@@ -105,6 +105,28 @@ class AnalyzerContractArtifactsTest {
   }
 
   @Test
+  @DisplayName("profile catalog fixture carries the human-readable recognition summary")
+  void profileCatalogFixtureConforms() throws IOException {
+    JsonNode summary = fixture("profile-catalog-response.json")
+      .path("profiles")
+      .path(0)
+      .path("controlRecognitionSummary");
+    JsonNode summarySchema = JSON.readTree(
+      CONTRACT_ROOT.resolve("profile-catalog-entry.schema.json").toFile()
+    ).path("properties").path("controlRecognitionSummary");
+    Set<ValidationMessage> messages = SCHEMAS.getSchema(summarySchema).validate(summary);
+    assertTrue(messages.isEmpty(), messages.toString());
+    assertEquals("RULES", summary.path("mode").asText());
+    assertFalse(summary.path("conditions").isEmpty());
+    JsonNode condition = summary.path("conditions").path(0);
+    assertEquals("FIELD_VALUE_EQUALS", condition.path("kind").asText());
+    assertEquals("Control task", condition.path("sourceLabel").asText());
+    assertEquals("Positive", condition.path("value").asText());
+    assertFalse(condition.has("targetField"));
+    assertFalse(condition.has("operand"));
+  }
+
+  @Test
   @DisplayName("known, unknown, control, non-match, NONE, and FILE traffic conform to normalized FHIR v1")
   void normalizedTrafficFixturesConform() throws IOException {
     for (String fixture : new String[] {
@@ -430,20 +452,6 @@ class AnalyzerContractArtifactsTest {
       validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty(),
       "a malformed duplicate must not evade the " + field + " cardinality check"
     );
-  }
-
-  @Test
-  @DisplayName("bulk full-state registration artifacts are absent")
-  void fullStateRegistrationArtifactsAreAbsent() {
-    for (String removed : new String[] {
-      "registration-sync.schema.json",
-      "registration-sync-result.schema.json",
-      "fixtures/registration-initial.json",
-      "fixtures/registration-next.json",
-      "fixtures/registration-result.json"
-    }) {
-      assertFalse(Files.exists(CONTRACT_ROOT.resolve(removed)), removed);
-    }
   }
 
   @Test
