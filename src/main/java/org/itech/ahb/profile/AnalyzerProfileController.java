@@ -104,6 +104,11 @@ public class AnalyzerProfileController {
     return catalog.reactivate(profileId, request.actor());
   }
 
+  @ExceptionHandler(ProfileNotFoundException.class)
+  public ResponseEntity<Map<String, String>> handleNotFound(ProfileNotFoundException exception) {
+    return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", exception.getMessage()));
+  }
+
   @ExceptionHandler(ProfileCatalogException.class)
   public ResponseEntity<Map<String, String>> handleCatalogError(ProfileCatalogException exception) {
     return ResponseEntity.badRequest().body(Map.of("error", exception.getMessage()));

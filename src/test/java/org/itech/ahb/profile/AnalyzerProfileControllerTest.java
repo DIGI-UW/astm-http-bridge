@@ -19,6 +19,8 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.MediaType;
@@ -214,6 +216,46 @@ class AnalyzerProfileControllerTest {
       .perform(get("/api/profiles/drafts/{draftId}", draftId))
       .andExpect(status().isOk())
       .andExpect(jsonPath("$.draftId").value(draftId));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+    strings = {
+      "/api/profiles/missing-profile",
+      "/api/profiles/genexpert-astm?revision=999",
+      "/api/profiles/drafts/missing-draft",
+      "/api/profiles/missing-profile/history"
+    }
+  )
+  void missingResourcesReturnNotFound(String path) throws Exception {
+    mockMvc
+      .perform(get(path))
+      .andExpect(status().isNotFound())
+      .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.startsWith("Unknown profile")));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+    strings = {
+      "/api/profiles/drafts/missing-draft/publish",
+      "/api/profiles/missing-profile/duplicate",
+      "/api/profiles/missing-profile/update",
+      "/api/profiles/missing-profile/deactivate",
+      "/api/profiles/missing-profile/reactivate"
+    }
+  )
+  void mutationsOfMissingResourcesReturnNotFound(String path) throws Exception {
+    ObjectNode request = objectMapper.createObjectNode().put("actor", "review-test");
+    if (path.endsWith("/duplicate") || path.endsWith("/update")) {
+      request.put("sourceRevision", 1);
+    }
+    if (path.endsWith("/duplicate")) {
+      request.put("displayName", "New Profile");
+    }
+    mockMvc
+      .perform(post(path).contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsBytes(request)))
+      .andExpect(status().isNotFound())
+      .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.startsWith("Unknown profile")));
   }
 
   private ObjectNode publishedFixture(String filename) throws Exception {

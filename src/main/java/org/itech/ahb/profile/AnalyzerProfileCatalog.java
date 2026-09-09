@@ -222,7 +222,7 @@ public final class AnalyzerProfileCatalog {
   public synchronized ProfileDraft requireDraft(String draftId) {
     ProfileDraft draft = drafts.get(draftId);
     if (draft == null) {
-      throw new ProfileCatalogException("Unknown profile draft: " + draftId);
+      throw new ProfileNotFoundException("Unknown profile draft: " + draftId);
     }
     return draft;
   }
@@ -234,7 +234,7 @@ public final class AnalyzerProfileCatalog {
   public synchronized ProfileRevision require(String profileId, int revision) {
     TreeMap<Integer, ProfileRevision> history = revisions.get(profileId);
     if (history == null || !history.containsKey(revision)) {
-      throw new ProfileCatalogException("Unknown profile revision: " + profileId + "@" + revision);
+      throw new ProfileNotFoundException("Unknown profile revision: " + profileId + "@" + revision);
     }
     return history.get(revision);
   }
@@ -242,14 +242,15 @@ public final class AnalyzerProfileCatalog {
   public synchronized ProfileRevision requireLatest(String profileId) {
     TreeMap<Integer, ProfileRevision> history = revisions.get(profileId);
     if (history == null || history.isEmpty()) {
-      throw new ProfileCatalogException("Unknown profile: " + profileId);
+      throw new ProfileNotFoundException("Unknown profile: " + profileId);
     }
     return history.lastEntry().getValue();
   }
 
   public synchronized List<ProfileRevision> history(String profileId) {
+    requireLatest(profileId);
     TreeMap<Integer, ProfileRevision> history = revisions.get(profileId);
-    return history == null ? List.of() : List.copyOf(history.values());
+    return List.copyOf(history.values());
   }
 
   public synchronized List<ProfileRevision> latest() {
