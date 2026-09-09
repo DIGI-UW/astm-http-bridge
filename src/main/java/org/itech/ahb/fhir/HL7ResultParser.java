@@ -75,6 +75,7 @@ public class HL7ResultParser {
         }
 
         accession = actualAccession(accession, fieldValues, delimiters);
+        // Recognition already used instrument evidence, never this display-only fallback.
         if (accession == null) accession = "HL7-UNKNOWN";
 
         return results.isEmpty() ? null : new ParsedResults(accession, results);

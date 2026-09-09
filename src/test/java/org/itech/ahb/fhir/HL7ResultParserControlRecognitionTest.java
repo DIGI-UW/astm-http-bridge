@@ -11,6 +11,8 @@ import org.itech.ahb.profile.ControlResultRecognition;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 @DisplayName("HL7ResultParser control recognition")
 class HL7ResultParserControlRecognitionTest {
@@ -24,6 +26,52 @@ class HL7ResultParserControlRecognitionTest {
   class ProfileRules {
 
     @Test
+    void emptyPatientIdentifierComponentIsMissingEvidence() {
+      ParsedResults parsed = HL7ResultParser.parse(
+        segments("PID|1||^AUTHORITY", "OBX|1|NM|WBC||7.5|10*3/uL"),
+        TestControlRecognitions.rule("SPECIMEN_ID_PATTERN", null, "^$")
+      );
+
+      assertNotNull(parsed);
+      assertEquals("HL7-UNKNOWN", parsed.accessionNumber());
+      assertFalse(parsed.results().get(0).isControl());
+      assertEquals("", parsed.results().get(0).controlRecognitionAssessment().evaluations().get(0).rawValue());
+    }
+
+    @ParameterizedTest
+    @CsvSource({ "SPECIMEN_ID_PREFIX,HL7-", "SPECIMEN_ID_PATTERN,^HL7-UNKNOWN$" })
+    void displayFallbackIsNotSpecimenRecognitionEvidence(String ruleType, String operand) {
+      ParsedResults parsed = HL7ResultParser.parse(
+        segments("MSH|^~\\&|A|B|C|D|20260326||ORU^R01|1|P|2.3.1", "OBX|1|NM|WBC||7.5|10*3/uL"),
+        TestControlRecognitions.rule(ruleType, null, operand)
+      );
+
+      assertNotNull(parsed);
+      assertEquals("HL7-UNKNOWN", parsed.accessionNumber());
+      var result = parsed.results().get(0);
+      assertFalse(result.isControl(), "a display placeholder must not classify a result as a control");
+      var evidence = result.controlRecognitionAssessment().evaluations().get(0);
+      assertEquals("specimenId", evidence.sourceField());
+      assertEquals("", evidence.rawValue());
+      assertFalse(evidence.matched());
+    }
+
+    @Test
+    void missingAccessionStillAllowsRecognitionFromAnActualProfileSelectedField() {
+      ParsedResults parsed = HL7ResultParser.parse(
+        segments("OBR|1|||QC-PANEL", "OBX|1|NM|WBC||7.5|10*3/uL"),
+        TestControlRecognitions.rule("FIELD_EQUALS", "OBR.4", "QC-PANEL")
+      );
+
+      assertNotNull(parsed);
+      assertEquals("HL7-UNKNOWN", parsed.accessionNumber());
+      assertTrue(parsed.results().get(0).isControl());
+      var evidence = parsed.results().get(0).controlRecognitionAssessment().evaluations().get(0);
+      assertEquals("OBR.4", evidence.sourceField());
+      assertEquals("QC-PANEL", evidence.rawValue());
+    }
+
+    @Test
     void obrFieldRuleFlagsAllObservationsAsControl() {
       List<String> message = segments(
         "MSH|^~\\&|A|B|C|D|20260326||ORU^R01|1|P|2.3.1",
@@ -32,11 +80,7 @@ class HL7ResultParserControlRecognitionTest {
         "OBX|1|NM|WBC||7.5|10*3/uL",
         "OBX|2|NM|RBC||4.82|10*6/uL"
       );
-      ControlResultRecognition recognition = TestControlRecognitions.rule(
-        "FIELD_EQUALS",
-        "OBR.4",
-        "QC-PANEL"
-      );
+      ControlResultRecognition recognition = TestControlRecognitions.rule("FIELD_EQUALS", "OBR.4", "QC-PANEL");
 
       ParsedResults parsed = HL7ResultParser.parse(message, recognition);
 
@@ -54,11 +98,7 @@ class HL7ResultParserControlRecognitionTest {
         "OBR|1||ACC001|CBC",
         "OBX|1|NM|WBC||7.5|10*3/uL"
       );
-      ControlResultRecognition recognition = TestControlRecognitions.rule(
-        "FIELD_EQUALS",
-        "PID.3",
-        "QC-PATIENT"
-      );
+      ControlResultRecognition recognition = TestControlRecognitions.rule("FIELD_EQUALS", "PID.3", "QC-PATIENT");
 
       ParsedResults parsed = HL7ResultParser.parse(message, recognition);
 
@@ -74,11 +114,7 @@ class HL7ResultParserControlRecognitionTest {
         "OBR|1||QC-LOT-001|CBC",
         "OBX|1|NM|WBC||7.5|10*3/uL"
       );
-      ControlResultRecognition recognition = TestControlRecognitions.rule(
-        "SPECIMEN_ID_PREFIX",
-        null,
-        "QC-"
-      );
+      ControlResultRecognition recognition = TestControlRecognitions.rule("SPECIMEN_ID_PREFIX", null, "QC-");
 
       ParsedResults parsed = HL7ResultParser.parse(message, recognition);
 
@@ -95,11 +131,7 @@ class HL7ResultParserControlRecognitionTest {
         "OBR|1||ACC001|CTRL-CBC",
         "OBX|1|NM|WBC||7.5|10*3/uL"
       );
-      ControlResultRecognition recognition = TestControlRecognitions.rule(
-        "FIELD_CONTAINS",
-        "OBR.4",
-        "CTRL"
-      );
+      ControlResultRecognition recognition = TestControlRecognitions.rule("FIELD_CONTAINS", "OBR.4", "CTRL");
 
       ParsedResults parsed = HL7ResultParser.parse(message, recognition);
 
@@ -141,10 +173,7 @@ class HL7ResultParserControlRecognitionTest {
         "OBX|1|NM|WBC||7.5|10*3/uL"
       );
 
-      ParsedResults parsed = HL7ResultParser.parse(
-        message,
-        ControlResultRecognition.none()
-      );
+      ParsedResults parsed = HL7ResultParser.parse(message, ControlResultRecognition.none());
 
       assertNotNull(parsed);
       assertFalse(parsed.results().get(0).isControl());
@@ -158,11 +187,7 @@ class HL7ResultParserControlRecognitionTest {
         "OBR|1||ACC001|CBC",
         "OBX|1|NM|WBC||7.5|10*3/uL"
       );
-      ControlResultRecognition recognition = TestControlRecognitions.rule(
-        "FIELD_EQUALS",
-        "OBR.4",
-        "QC-PANEL"
-      );
+      ControlResultRecognition recognition = TestControlRecognitions.rule("FIELD_EQUALS", "OBR.4", "QC-PANEL");
 
       ParsedResults parsed = HL7ResultParser.parse(message, recognition);
 
@@ -183,11 +208,7 @@ class HL7ResultParserControlRecognitionTest {
         "OBR|1|PLACER|FILLER|CBC",
         "OBX|1|NM|WBC||7.5|10*3/uL"
       );
-      ControlResultRecognition recognition = TestControlRecognitions.rule(
-        "FIELD_EQUALS",
-        "OBR.1",
-        "1"
-      );
+      ControlResultRecognition recognition = TestControlRecognitions.rule("FIELD_EQUALS", "OBR.1", "1");
 
       ParsedResults parsed = HL7ResultParser.parse(message, recognition);
 
@@ -203,11 +224,7 @@ class HL7ResultParserControlRecognitionTest {
         "OBR|1||ACC001|CBC",
         "OBX|1|NM|WBC||7.5|10*3/uL"
       );
-      ControlResultRecognition recognition = TestControlRecognitions.rule(
-        "FIELD_CONTAINS",
-        "PID.5",
-        "DOE"
-      );
+      ControlResultRecognition recognition = TestControlRecognitions.rule("FIELD_CONTAINS", "PID.5", "DOE");
 
       ParsedResults parsed = HL7ResultParser.parse(message, recognition);
 
