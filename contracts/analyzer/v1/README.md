@@ -79,6 +79,24 @@ classification and one control-recognition extension. A matching rule
 evaluation must carry its complete rule and source evidence; explicit `NONE`
 never invents an evaluation.
 
+### FILE delivery identity and retries
+
+`Bundle.identifier` uses the analyzer-message-id system and identifies a delivery,
+not a parsing attempt. For FILE traffic its value is `file-v1:` followed by a
+SHA-256 digest of the connection ID, lowercase SHA-256 content hash of the exact
+file bytes parsed, and accession number. Each UTF-8 component is prefixed by its
+four-byte big-endian byte length before hashing. File paths, process lifetime,
+and generated FHIR resource IDs do not participate in this identity.
+
+Retrying a partially delivered file, a lost acknowledgment, or the same bytes
+under a new filename therefore preserves the per-accession identity. Different
+connections, file contents, or accessions produce distinct delivery identities.
+OpenELIS must record the connection/message receipt transactionally with result
+processing and return success for a previously accepted delivery without staging
+results or processing operational QC again. This receipt must survive result
+review and deletion of staging rows. Intentional reprocessing of held results is
+a separate OpenELIS operation, not a fresh FILE delivery or a receipt reset.
+
 ## Versioned artifacts
 
 | Artifact                                 | Direction          | Runtime owner |
