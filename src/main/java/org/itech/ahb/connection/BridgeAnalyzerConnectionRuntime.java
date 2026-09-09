@@ -159,6 +159,16 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     ObjectNode profile,
     ObjectNode values
   ) {
+    if ("HTTP".equals(nullableText(values, "transport"))) {
+      if (
+        !"FILE".equals(protocol) ||
+        !("CSV".equals(nullableText(values, "fileFormat")) || "TSV".equals(nullableText(values, "fileFormat")))
+      ) {
+        throw new AnalyzerConnectionException("HTTP input requires a tabular CSV or TSV profile");
+      }
+      // The shared HTTP controller receives traffic; this connection owns its sender binding.
+      return;
+    }
     if ("FILE".equals(protocol)) {
       if (fileWatcher == null) {
         throw new AnalyzerConnectionException("FILE runtime is disabled in this Bridge deployment");
@@ -215,6 +225,9 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
   }
 
   private void deactivateTransport(String protocol, String connectionId, String analyzerId, ObjectNode values) {
+    if ("HTTP".equals(nullableText(values, "transport"))) {
+      return;
+    }
     if ("FILE".equals(protocol)) {
       if (fileWatcher != null) {
         Path directory = Path.of(requiredText(values, "directory", "FILE directory")).normalize();
@@ -236,7 +249,7 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
   }
 
   private static String registryKey(String protocol, String connectionId, ObjectNode values) {
-    if ("FILE".equals(protocol)) {
+    if ("FILE".equals(protocol) && !"HTTP".equals(nullableText(values, "transport"))) {
       return Path.of(requiredText(values, "directory", "FILE directory")).normalize() + "#" + connectionId;
     }
     return "connection:" + connectionId;
@@ -258,7 +271,11 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     entry.setProfileRevision(requiredRevision(connection.path("profileRef"), "revision", "Profile revision"));
     entry.setName(requiredText(connection, "displayName", "Connection name"));
     entry.setExpectedProtocol(requiredText(profile.path("protocol"), "name", "Profile protocol"));
-    if ("TCP/IP".equals(nullableText(values, "transport")) && "CLIENT".equals(nullableText(values, "connectionRole"))) {
+    entry.setInboundTransport(nullableText(values, "transport"));
+    if (
+      "HTTP".equals(entry.getInboundTransport()) ||
+      ("TCP/IP".equals(entry.getInboundTransport()) && "CLIENT".equals(nullableText(values, "connectionRole")))
+    ) {
       entry.setInboundSourceId(requiredText(values, "host", "Analyzer host"));
     }
     entry.setOutboundHost(nullableText(values, "host"));
@@ -272,7 +289,9 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     if ("ASTM".equals(entry.getExpectedProtocol())) {
       entry.setAstmResultRecordSelection(AstmResultRecordSelection.fromProfile(profile.path("configDefaults")));
     } else if ("FILE".equals(entry.getExpectedProtocol())) {
-      entry.setFileDirectory(Path.of(requiredText(values, "directory", "FILE directory")).normalize().toString());
+      if (!"HTTP".equals(entry.getInboundTransport())) {
+        entry.setFileDirectory(Path.of(requiredText(values, "directory", "FILE directory")).normalize().toString());
+      }
       entry.setTabularFileLayout(tabularFileLayout(profile));
       entry.setTabularResultValueSelection(TabularResultValueSelection.fromProfile(profile));
     }

@@ -7,15 +7,15 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
 /** Stable identity for one accession delivery, independent of file path or process lifetime. */
-final class FileDeliveryIdentity {
+public final class FileDeliveryIdentity {
 
   private FileDeliveryIdentity() {}
 
-  static String contentHash(byte[] content) {
+  public static String contentHash(byte[] content) {
     return HexFormat.of().formatHex(sha256().digest(content));
   }
 
-  static String forAccession(String connectionId, String contentHash, String accessionNumber) {
+  public static String forAccession(String connectionId, String contentHash, String accessionNumber) {
     MessageDigest digest = sha256();
     for (String component : new String[] { connectionId, contentHash, accessionNumber }) {
       if (component == null || component.isBlank()) {

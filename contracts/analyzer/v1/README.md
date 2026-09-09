@@ -79,6 +79,29 @@ classification and one control-recognition extension. A matching rule
 evaluation must carry its complete rule and source evidence; explicit `NONE`
 never invents an evaluation.
 
+### HTTP tabular input
+
+HTTP CSV uses the existing FILE profile contract, not ASTM records. The profile
+declares a required `transport` connection field offering `HTTP` and a required
+`host` field for the sender's source IP. These values are persisted with the
+connection; the shared HTTP input endpoint resolves only active, uniquely owned
+sender bindings. Unregistered or ambiguous addresses fail closed. Forwarded
+headers follow the explicitly trusted-proxy rules in the deployment README.
+
+The pinned profile supplies CSV/TSV format, delimiter, skipped rows, column
+mapping, result-value selection, and control recognition. HTTP activation does
+not start a folder watcher. `filePattern` remains profile data for the existing
+FILE contract but is not used for HTTP delivery. No shipped profile is changed
+implicitly; an HTTP-capable profile must explicitly offer these connection fields.
+Inbound HTTP cannot be actively probed as a remote instrument endpoint: profiles
+should declare `connectionTest: false`, and actual input delivery supplies traffic
+evidence. A direct probe request reports failure with `http.input.verify.with.delivery`.
+
+Each accession is forwarded separately. The request succeeds only after all
+accessions are accepted. HTTP tabular retries use the FILE identity below, hashing
+the UTF-8 bytes of the request text consumed by the parser, so replaying a partially
+accepted request preserves every accession's delivery identity.
+
 ### FILE delivery identity and retries
 
 `Bundle.identifier` uses the analyzer-message-id system and identifies a delivery,

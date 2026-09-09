@@ -35,9 +35,20 @@ class AnalyzerConnectionProbeTest {
   }
 
   @Test
+  void inboundHttpRequiresDeliveryEvidenceRatherThanADirectoryOrRemoteProbe() {
+    ObjectNode connection = connection();
+    connection.withObject("values").put("transport", "HTTP").put("host", "192.0.2.25");
+    ObjectNode result = probe.execute(request(), connection, profile("FILE"));
+    assertThat(result.path("status").asText()).isEqualTo("FAILED");
+    assertThat(result.path("checks").get(0).path("messageKey").asText()).isEqualTo("http.input.verify.with.delivery");
+    verifyNoInteractions(executor);
+  }
+
+  @Test
   void probesAFileConnectionUsingOnlyItsSavedDirectory() {
-    when(executor.probeDirectory("/bridge/inbox"))
-      .thenReturn(check("DIRECTORY", "PASSED", "directory.ready", Map.of("path", "/bridge/inbox")));
+    when(executor.probeDirectory("/bridge/inbox")).thenReturn(
+      check("DIRECTORY", "PASSED", "directory.ready", Map.of("path", "/bridge/inbox"))
+    );
     ObjectNode connection = connection();
     connection.withObject("values").put("directory", "/bridge/inbox");
 
@@ -47,17 +58,18 @@ class AnalyzerConnectionProbeTest {
     assertThat(result.path("checks").get(0).path("key").asText()).isEqualTo("directory");
     assertThat(result.path("checks").get(0).path("status").asText()).isEqualTo("PASSED");
     assertThat(result.path("checks").get(0).path("messageKey").asText()).isEqualTo("directory.ready");
-    assertThat(result.path("checks").get(0).path("details").path("path").asText())
-      .isEqualTo("/bridge/inbox");
+    assertThat(result.path("checks").get(0).path("details").path("path").asText()).isEqualTo("/bridge/inbox");
     verify(executor).probeDirectory("/bridge/inbox");
   }
 
   @Test
   void probesAnAstmClientConnectionUsingItsSavedRemoteEndpoint() {
-    when(executor.probeRemote("ASTM", "192.0.2.10", 5000, 5_000))
-      .thenReturn(check("REMOTE_PROTOCOL", "PASSED", "remote.ready", Map.of("port", 5000)));
+    when(executor.probeRemote("ASTM", "192.0.2.10", 5000, 5_000)).thenReturn(
+      check("REMOTE_PROTOCOL", "PASSED", "remote.ready", Map.of("port", 5000))
+    );
     ObjectNode connection = connection();
-    connection.withObject("values")
+    connection
+      .withObject("values")
       .put("transport", "TCP/IP")
       .put("connectionRole", "CLIENT")
       .put("host", "192.0.2.10")
@@ -72,13 +84,9 @@ class AnalyzerConnectionProbeTest {
 
   @Test
   void probesAnAstmServerConnectionUsingItsSavedListenerPort() {
-    when(executor.probeListener(5001))
-      .thenReturn(check("LISTENER", "PASSED", "listener.ready", Map.of("port", 5001)));
+    when(executor.probeListener(5001)).thenReturn(check("LISTENER", "PASSED", "listener.ready", Map.of("port", 5001)));
     ObjectNode connection = connection();
-    connection.withObject("values")
-      .put("transport", "TCP/IP")
-      .put("connectionRole", "SERVER")
-      .put("port", 5001);
+    connection.withObject("values").put("transport", "TCP/IP").put("connectionRole", "SERVER").put("port", 5001);
 
     ObjectNode result = probe.execute(request(), connection, profile("ASTM"));
 
@@ -89,13 +97,11 @@ class AnalyzerConnectionProbeTest {
 
   @Test
   void probesAnActiveAstmServerThroughItsRunningBridgeListener() {
-    when(executor.probeRemote("ASTM", "127.0.0.1", 5001, 5_000))
-      .thenReturn(check("REMOTE_PROTOCOL", "PASSED", "remote.astm.ready", Map.of("port", 5001)));
+    when(executor.probeRemote("ASTM", "127.0.0.1", 5001, 5_000)).thenReturn(
+      check("REMOTE_PROTOCOL", "PASSED", "remote.astm.ready", Map.of("port", 5001))
+    );
     ObjectNode connection = connection();
-    connection.withObject("values")
-      .put("transport", "TCP/IP")
-      .put("connectionRole", "SERVER")
-      .put("port", 5001);
+    connection.withObject("values").put("transport", "TCP/IP").put("connectionRole", "SERVER").put("port", 5001);
     connection.put("actualRuntimeState", "ACTIVE");
     ObjectNode activeRuntimeRef = connection.putObject("activeRuntimeRef");
     activeRuntimeRef.set("profileRef", connection.path("profileRef").deepCopy());
@@ -106,19 +112,17 @@ class AnalyzerConnectionProbeTest {
 
     assertThat(result.path("status").asText()).isEqualTo("SUCCEEDED");
     assertThat(result.path("checks").get(0).path("key").asText()).isEqualTo("listener");
-    assertThat(result.path("checks").get(0).path("messageKey").asText())
-      .isEqualTo("listener.ready");
+    assertThat(result.path("checks").get(0).path("messageKey").asText()).isEqualTo("listener.ready");
     verify(executor).probeRemote("ASTM", "127.0.0.1", 5001, 5_000);
   }
 
   @Test
   void probesAnRs232ConnectionUsingItsSavedSerialPort() {
-    when(executor.probeSerialDevice("/dev/ttyUSB0"))
-      .thenReturn(check("SERIAL_DEVICE", "PASSED", "serial.ready", Map.of("path", "/dev/ttyUSB0")));
+    when(executor.probeSerialDevice("/dev/ttyUSB0")).thenReturn(
+      check("SERIAL_DEVICE", "PASSED", "serial.ready", Map.of("path", "/dev/ttyUSB0"))
+    );
     ObjectNode connection = connection();
-    connection.withObject("values")
-      .put("transport", "RS-232")
-      .put("serialPort", "/dev/ttyUSB0");
+    connection.withObject("values").put("transport", "RS-232").put("serialPort", "/dev/ttyUSB0");
 
     ObjectNode result = probe.execute(request(), connection, profile("ASTM"));
 
@@ -141,10 +145,12 @@ class AnalyzerConnectionProbeTest {
 
   @Test
   void preservesTimeoutAsOverallProbeEvidence() {
-    when(executor.probeRemote("ASTM", "192.0.2.10", 5000, 5_000))
-      .thenReturn(check("REMOTE_PROTOCOL", "TIMED_OUT", "remote.timeout", Map.of()));
+    when(executor.probeRemote("ASTM", "192.0.2.10", 5000, 5_000)).thenReturn(
+      check("REMOTE_PROTOCOL", "TIMED_OUT", "remote.timeout", Map.of())
+    );
     ObjectNode connection = connection();
-    connection.withObject("values")
+    connection
+      .withObject("values")
       .put("transport", "TCP/IP")
       .put("connectionRole", "CLIENT")
       .put("host", "192.0.2.10")

@@ -18,11 +18,7 @@ public final class AnalyzerConnectionProbe {
   private final Clock clock;
   private final ConnectionProbeExecutor executor;
 
-  public AnalyzerConnectionProbe(
-    ObjectMapper objectMapper,
-    Clock clock,
-    ConnectionProbeExecutor executor
-  ) {
+  public AnalyzerConnectionProbe(ObjectMapper objectMapper, Clock clock, ConnectionProbeExecutor executor) {
     this.objectMapper = objectMapper;
     this.clock = clock;
     this.executor = executor;
@@ -49,6 +45,10 @@ public final class AnalyzerConnectionProbe {
 
   private ProbeCheck check(ObjectNode connection, ObjectNode profile, ObjectNode values) {
     String protocol = profile.path("protocol").path("name").asText();
+    if ("FILE".equals(protocol) && "HTTP".equals(text(values, "transport"))) {
+      // An inbound sender is not an endpoint Bridge can actively probe.
+      return new ProbeCheck("HTTP_INPUT", "UNSUPPORTED", "http.input.verify.with.delivery", 0, Map.of());
+    }
     if ("FILE".equals(protocol)) {
       String directory = text(values, "directory");
       return directory == null
@@ -76,27 +76,16 @@ public final class AnalyzerConnectionProbe {
         return missing("LISTENER", "listener.configuration.missing");
       }
       if (currentRuntimeMatchesConfiguration(connection)) {
-        ProbeCheck protocolCheck = executor.probeRemote(
-          protocol,
-          "127.0.0.1",
-          port,
-          timeout(values)
-        );
+        ProbeCheck protocolCheck = executor.probeRemote(protocol, "127.0.0.1", port, timeout(values));
         return protocolCheck.status().equals("PASSED")
-          ? new ProbeCheck(
-              "LISTENER",
-              "PASSED",
-              "listener.ready",
-              protocolCheck.responseTimeMs(),
-              Map.of("port", port)
-            )
+          ? new ProbeCheck("LISTENER", "PASSED", "listener.ready", protocolCheck.responseTimeMs(), Map.of("port", port))
           : new ProbeCheck(
-              "LISTENER",
-              protocolCheck.status(),
-              protocolCheck.code(),
-              protocolCheck.responseTimeMs(),
-              protocolCheck.args()
-            );
+            "LISTENER",
+            protocolCheck.status(),
+            protocolCheck.code(),
+            protocolCheck.responseTimeMs(),
+            protocolCheck.args()
+          );
       }
       return executor.probeListener(port);
     }
@@ -109,10 +98,12 @@ public final class AnalyzerConnectionProbe {
 
   private static boolean currentRuntimeMatchesConfiguration(ObjectNode connection) {
     JsonNode active = connection.path("activeRuntimeRef");
-    return "ACTIVE".equals(connection.path("actualRuntimeState").asText()) &&
-    active.isObject() &&
-    active.path("profileRef").equals(connection.path("profileRef")) &&
-    active.path("configFingerprint").asText().equals(connection.path("configFingerprint").asText());
+    return (
+      "ACTIVE".equals(connection.path("actualRuntimeState").asText()) &&
+      active.isObject() &&
+      active.path("profileRef").equals(connection.path("profileRef")) &&
+      active.path("configFingerprint").asText().equals(connection.path("configFingerprint").asText())
+    );
   }
 
   private ObjectNode toContractCheck(ProbeCheck check) {
@@ -155,16 +146,12 @@ public final class AnalyzerConnectionProbe {
   }
 
   private static Integer port(JsonNode value) {
-    return value.isIntegralNumber() && value.asInt() >= 1 && value.asInt() <= 65_535
-      ? value.asInt()
-      : null;
+    return value.isIntegralNumber() && value.asInt() >= 1 && value.asInt() <= 65_535 ? value.asInt() : null;
   }
 
   private static int timeout(JsonNode values) {
     JsonNode value = values.path("connectTimeoutMillis");
-    return value.isIntegralNumber() && value.asInt() > 0
-      ? value.asInt()
-      : DEFAULT_TIMEOUT_MILLIS;
+    return value.isIntegralNumber() && value.asInt() > 0 ? value.asInt() : DEFAULT_TIMEOUT_MILLIS;
   }
 
   private static void putScalar(ObjectNode target, String key, Object value) {
