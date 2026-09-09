@@ -21,7 +21,7 @@ class ShippedProfileCatalogTest {
     "fluorocycler-xt",
     "sha256:8d099084227b7de083a6f8f0511234c8f09540534182a380060fe921a7f28c21",
     "genexpert-astm",
-    "sha256:5184c52a44ec58932116fb3c4e9495b6cd8f05e4e84916f183f57b428a24e4ee",
+    "sha256:c2168ff7438aaea72eb4dcd646e2348601899b4b401b3c235fae07b5804081b2",
     "quantstudio",
     "sha256:b940cb5cc7191a44570a87326e7e5c2054f4ac6df42cdf653ae113b9df143e6e"
   );
