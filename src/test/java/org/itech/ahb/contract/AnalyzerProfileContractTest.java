@@ -133,6 +133,32 @@ class AnalyzerProfileContractTest {
   }
 
   @Test
+  @DisplayName("HL7 profiles require socket fields and protocol-specific recognition references")
+  void hl7ProfileContractValidatesSocketFieldsAndRecognition() throws IOException {
+    ObjectNode profile = fixture("analyzer-profile-astm.json").deepCopy();
+    profile.putObject("protocol").put("name", "HL7").put("version", "2.5.1");
+    ObjectNode rules = (ObjectNode) profile.path("controlResultRecognition").path("rules");
+    rules.removeAll();
+    ObjectNode rule = rules.putObject("fixture-control");
+    rule.put("ruleType", "FIELD_EQUALS").put("targetField", "MSH.3.1").put("operand", "CONTROL");
+    assertTrue(PROFILE_SCHEMA.validate(profile).isEmpty(), PROFILE_SCHEMA.validate(profile)::toString);
+
+    for (String missing : List.of("transport", "transport_config", "communication", "identifier_pattern")) {
+      ObjectNode invalid = profile.deepCopy();
+      invalid.remove(missing);
+      assertFalse(PROFILE_SCHEMA.validate(invalid).isEmpty(), "accepted missing HL7 " + missing);
+    }
+    for (String field : List.of("H.3", "MSH.0", "MSH.3.0", "SAMPLE_ID", "MSH.3.1.1.1")) {
+      rule.put("targetField", field);
+      assertFalse(PROFILE_SCHEMA.validate(profile).isEmpty(), "accepted invalid HL7 field " + field);
+    }
+    rule.remove("targetField");
+    assertFalse(PROFILE_SCHEMA.validate(profile).isEmpty(), "accepted FIELD_EQUALS without a source field");
+    rule.put("ruleType", "SPECIMEN_ID_PREFIX");
+    assertTrue(PROFILE_SCHEMA.validate(profile).isEmpty(), PROFILE_SCHEMA.validate(profile)::toString);
+  }
+
+  @Test
   @DisplayName("catalog-generated revision state is separate from authored profile behavior")
   void catalogMetadataIsSeparate() throws IOException {
     for (String fixtureName : PROFILE_FIXTURES) {
