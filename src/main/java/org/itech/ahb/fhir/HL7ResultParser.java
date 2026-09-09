@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 import lombok.extern.slf4j.Slf4j;
 import org.itech.ahb.fhir.FhirBundleBuilder.AnalyzerResult;
 import org.itech.ahb.profile.ControlRecognitionRule;
@@ -41,61 +42,87 @@ public class HL7ResultParser {
         String accession = null;
         Map<String, String> fieldValues = new HashMap<>();
         List<AnalyzerResult> results = new ArrayList<>();
+        Delimiters delimiters = new Delimiters('|', '^', '~', '&');
 
         for (String line : segmentLines) {
-            if (line == null) continue;
+            if (line == null || line.length() < 4) continue;
+            String segment = line.substring(0, 3);
+            if ("MSH".equals(segment) && line.length() >= 8) {
+                delimiters = new Delimiters(line.charAt(3), line.charAt(4), line.charAt(5), line.charAt(7));
+            }
+            if (line.charAt(3) != delimiters.field()) continue;
+            extractRecognitionFields(line, segment, delimiters, fieldValues);
 
-            if (line.startsWith("OBR|")) {
-                accession = parseAccessionFromOBR(line);
-                // Extract OBR fields for rule evaluation
-                String[] fields = line.split("\\|", -1);
-                for (int i = 0; i < fields.length; i++) {
-                    fieldValues.put("OBR." + i, fields[i].trim());
-                }
+            if ("OBR".equals(segment)) {
+                accession = parseAccessionFromOBR(line, delimiters);
             }
 
-            if (line.startsWith("PID|")) {
-                // Extract PID fields for rule evaluation
-                String[] fields = line.split("\\|", -1);
-                for (int i = 0; i < fields.length; i++) {
-                    fieldValues.put("PID." + i, fields[i].trim());
-                }
-            }
-
-            if (line.startsWith("OBX|")) {
-                AnalyzerResult result = parseObxSegment(line);
+            if ("OBX".equals(segment)) {
+                AnalyzerResult result = parseObxSegment(line, delimiters);
                 if (result != null) {
+                    String specimenId = actualAccession(accession, fieldValues, delimiters);
+                    Optional<ControlRecognitionRule> matchedRule =
+                            ControlResultRecognitionEvaluator.findMatchingRule(recognition, specimenId, fieldValues);
+                    if (matchedRule.isPresent()) {
+                        ControlRecognitionRule rule = matchedRule.get();
+                        result = result.withControl(true)
+                                .withControlLevel(rule.controlLevel())
+                                .withControlType(rule.controlType());
+                    }
                     results.add(result);
                 }
             }
         }
 
-        if (accession == null || accession.isBlank()) {
-            // Fallback: try PID-3 patient ID
-            String pid3 = fieldValues.get("PID.3");
-            if (pid3 != null && !pid3.isBlank()) {
-                accession = pid3.split("\\^")[0].trim();
-            }
-        }
-
-        if (accession != null) {
-            Optional<ControlRecognitionRule> matchedRule =
-                    ControlResultRecognitionEvaluator.findMatchingRule(
-                            recognition, accession, fieldValues);
-            if (matchedRule.isPresent()) {
-                ControlRecognitionRule rule = matchedRule.get();
-                results = results.stream()
-                        .map(result -> result.withControl(true)
-                                .withControlLevel(rule.controlLevel())
-                                .withControlType(rule.controlType()))
-                        .toList();
-            }
-        }
-
+        accession = actualAccession(accession, fieldValues, delimiters);
         if (accession == null) accession = "HL7-UNKNOWN";
 
         return results.isEmpty() ? null : new ParsedResults(accession, results);
     }
+
+    private static String actualAccession(String accession, Map<String, String> fields, Delimiters delimiters) {
+        if (accession != null && !accession.isBlank()) return accession;
+        String patientId = fields.get("PID.3");
+        if (patientId == null) return null;
+        String identifier = split(split(patientId, delimiters.repetition())[0], delimiters.component())[0].trim();
+        return identifier.isBlank() ? null : identifier;
+    }
+
+    /**
+     * Replace the segment's prior fields, including absent trailing components.
+     * Recognition runs at each OBX, so later observations/orders cannot rewrite
+     * earlier results. Whole fields retain raw repetitions; component references
+     * select the first repetition, as the profile path has no repetition index.
+     */
+    private static void extractRecognitionFields(
+            String line, String segment, Delimiters delimiters, Map<String, String> values) {
+        String prefix = segment + ".";
+        values.keySet().removeIf(key -> key.startsWith(prefix));
+        String[] fields = split(line, delimiters.field());
+        boolean header = "MSH".equals(segment);
+        if (header) values.put("MSH.1", String.valueOf(delimiters.field()));
+        for (int i = 1; i < fields.length; i++) {
+            String path = prefix + (header ? i + 1 : i);
+            values.put(path, fields[i].trim());
+            // MSH-2 declares separators; they are not component evidence.
+            if (header && i == 1) continue;
+            String[] components = split(split(fields[i], delimiters.repetition())[0], delimiters.component());
+            for (int component = 0; component < components.length; component++) {
+                String componentPath = path + "." + (component + 1);
+                values.put(componentPath, components[component].trim());
+                String[] subcomponents = split(components[component], delimiters.subcomponent());
+                for (int subcomponent = 0; subcomponent < subcomponents.length; subcomponent++) {
+                    values.put(componentPath + "." + (subcomponent + 1), subcomponents[subcomponent].trim());
+                }
+            }
+        }
+    }
+
+    private static String[] split(String value, char delimiter) {
+        return value.split(Pattern.quote(String.valueOf(delimiter)), -1);
+    }
+
+    private record Delimiters(char field, char component, char repetition, char subcomponent) {}
 
     /**
      * Parse HL7 from raw message string (splits on segment terminators first).
@@ -119,8 +146,8 @@ public class HL7ResultParser {
      * OBR|seq|placer|filler|panel...
      * Try filler (field 3) first, fall back to placer (field 2).
      */
-    private static String parseAccessionFromOBR(String obrLine) {
-        String[] fields = obrLine.split("\\|", -1);
+    private static String parseAccessionFromOBR(String obrLine, Delimiters delimiters) {
+        String[] fields = split(obrLine, delimiters.field());
         if (fields.length > 3 && !fields[3].isBlank()) {
             return fields[3].trim();
         }
@@ -137,11 +164,11 @@ public class HL7ResultParser {
      * OBX|seq|valueType|testCode|subId|value|units|refRange|flag...
      *     [1]   [2]      [3]     [4]   [5]   [6]
      */
-    private static AnalyzerResult parseObxSegment(String obxLine) {
-        String[] fields = obxLine.split("\\|", -1);
+    private static AnalyzerResult parseObxSegment(String obxLine, Delimiters delimiters) {
+        String[] fields = split(obxLine, delimiters.field());
         if (fields.length < 6) return null;
 
-        String testCode = extractTestCode(fields[3]);
+        String testCode = extractTestCode(fields[3], delimiters);
         if (testCode == null || testCode.isBlank()) return null;
 
         String value = fields.length > 5 ? fields[5].trim() : "";
@@ -149,7 +176,7 @@ public class HL7ResultParser {
 
         String units = "";
         if (fields.length > 6 && !fields[6].isBlank()) {
-            units = fields[6].split("\\^")[0].trim();
+            units = split(fields[6], delimiters.component())[0].trim();
         }
 
         String valueType = fields.length > 2 ? fields[2].trim() : "";
@@ -169,10 +196,10 @@ public class HL7ResultParser {
      * - Simple: "WBC" (component 1)
      * - Complex: "^^^WBC^WHITE BLOOD CELL" (component 4)
      */
-    private static String extractTestCode(String obx3Field) {
+    private static String extractTestCode(String obx3Field, Delimiters delimiters) {
         if (obx3Field == null || obx3Field.isBlank()) return null;
 
-        String[] components = obx3Field.split("\\^", -1);
+        String[] components = split(obx3Field, delimiters.component());
 
         // Strategy 1: component 1 (simple format)
         if (components.length > 0 && !components[0].isBlank()) {

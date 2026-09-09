@@ -30,6 +30,22 @@ connections contain no OpenELIS catalog IDs, control lots, Westgard state,
 release policy, or site lab units. Concrete connection values, including
 credentials and FILE directories, belong only to the durable Bridge connection.
 
+### HL7 recognition field paths
+
+HL7 field rules use `SEG.field`, `SEG.field.component`, or
+`SEG.field.component.subcomponent`, with one-based positions. `MSH.1` is the
+field separator and `MSH.2` is the encoding-character declaration; neither is
+split into component evidence. Parsing uses the separators declared by MSH,
+with standard separators for headerless segment fixtures. Whole-field values
+retain repetitions; a component path selects the first repetition because the
+path grammar has no repetition index.
+
+Recognition is evaluated for each OBX using that observation's fields and the
+preceding segment context. A subsequent segment replaces all previous fields
+for that segment type, including fields omitted from the new segment. Later
+observations and orders never reclassify earlier results. This field extraction
+does not activate an HL7 listener or establish a sender's routing authority.
+
 ## Ownership boundary
 
 - Bridge owns profile revisions, durable connections and their entered values,
