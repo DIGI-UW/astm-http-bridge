@@ -169,6 +169,7 @@ public class HttpForwardingRouter implements MessageRouter {
         }
         if (envelope.getRawMessage() == null || envelope.getRawMessage().trim().isEmpty()) {
             log.error("MessageEnvelope missing rawMessage");
+            recordRejection(envelope, envelope.getRawMessage(), 0, "MessageEnvelope missing rawMessage");
             return false;
         }
 
@@ -276,7 +277,8 @@ public class HttpForwardingRouter implements MessageRouter {
                 registeredAnalyzer.get().getControlResultRecognition();
         if ((envelope.getProtocol() == Protocol.ASTM || envelope.getProtocol() == Protocol.CSV)
                 && registeredAnalyzer.get().getAstmResultRecordSelection() == null) {
-            String reason = "FHIR routing requires ASTM result-record selection from a pinned profile";
+            String reason = "FHIR routing requires " + envelope.getProtocol()
+                    + " result-record selection from a pinned profile";
             log.error("{} for analyzer source {}", reason, envelope.getSourceId());
             recordRejection(envelope, envelope.getRawMessage(), 0, reason);
             return false;
@@ -328,6 +330,7 @@ public class HttpForwardingRouter implements MessageRouter {
                     + "Raw length: {} chars. Preview: [{}]",
                     envelope.getProtocol(), envelope.getSourceId(),
                     raw != null ? raw.length() : 0, preview);
+            recordRejection(envelope, raw, 0, envelope.getProtocol() + " parsing produced no results");
             return false;
         }
 

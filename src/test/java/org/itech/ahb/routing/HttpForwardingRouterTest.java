@@ -187,6 +187,40 @@ class HttpForwardingRouterTest {
         assertTrue(stateStore.listRejections(10).get(0).lastError().contains("result-record selection"));
     }
 
+    @Test
+    void emptyParsingPersistsRejectionWithoutDispatch() {
+        FhirRoutingConfig fhirConfig = new FhirRoutingConfig();
+        fhirConfig.setUseFhir(true);
+        int expectedCount = 0;
+        for (String raw : new String[] {
+                "MSH|^~\\&|SENDER|LAB|LIS|LAB|20260909000000||ORU^R01|1|P|2.5.1",
+                "not a result", "", null}) {
+            String source = "source-" + expectedCount;
+            AnalyzerRegistryConfig registry = new AnalyzerRegistryConfig();
+            AnalyzerEntry entry = new AnalyzerEntry();
+            entry.setId("analyzer-1");
+            entry.setExpectedProtocol("HL7");
+            entry.setControlResultRecognition(ControlResultRecognition.none());
+            registry.setAnalyzers(Map.of(source, entry));
+            HttpForwardingRouter router = new HttpForwardingRouter(
+                    minimalConfig(), fhirConfig, stateStore, registry);
+            MessageEnvelope message = MessageEnvelope.builder()
+                    .protocol(Protocol.HL7).transport(Transport.MLLP).sourceId(source)
+                    .resolvedAnalyzerId("analyzer-1").rawMessage(raw).build();
+
+            assertFalse(router.route(message));
+            assertEquals(0, requestCount.get(), "unparseable input must not reach OpenELIS");
+            List<RejectedBundle> rows = stateStore.listRejections(10);
+            assertEquals(++expectedCount, rows.size(), "each failed parse must produce one rejection");
+            RejectedBundle rejection = rows.stream()
+                    .filter(row -> source.equals(row.sourceId())).findFirst().orElseThrow();
+            assertEquals("HL7", rejection.protocol());
+            assertEquals(0, rejection.httpStatus());
+            assertTrue(rejection.lastError().contains(
+                    raw == null || raw.isBlank() ? "missing rawMessage" : "produced no results"));
+        }
+    }
+
     private HTTPForwardServerConfigurationProperties minimalConfig() {
         HTTPForwardServerConfigurationProperties c = new HTTPForwardServerConfigurationProperties();
         c.setUri(URI.create("http://localhost:" + port + "/analyzer"));
