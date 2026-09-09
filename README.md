@@ -20,6 +20,15 @@ Bridge and OpenELIS responsibilities are explicitly separated:
 
 ## Architecture
 
+**Current OGC-1054 delivery boundary:** the working connection paths are priority
+ASTM and FILE, including profile-driven HTTP CSV/TSV input. HL7 has normalized
+contract fixtures and parser coverage, but durable HL7/MLLP connection activation
+is not implemented. Enabling the shared MLLP listener does not create an authorized
+connection; its traffic is rejected. Do not deploy this revision as a replacement
+for a working HL7/MLLP installation until that runtime gap is addressed. The
+protocol diagram and MLLP settings below describe components, not completed
+connection support.
+
 ```
 Analyzer(s)                                    OpenELIS
 ───────────                                    ────────

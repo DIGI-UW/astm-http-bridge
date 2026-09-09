@@ -465,7 +465,7 @@ class AnalyzerContractArtifactsTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = { "ruleKey", "sourceField", "rawValue", "matched" })
+  @ValueSource(strings = { "ruleKey", "sourceField", "rawValue", "matched", "sourcePresent" })
   @DisplayName("recognition evaluation fields are singular")
   void recognitionEvaluationFieldsAreSingular(String field) throws IOException {
     JsonNode invalid = fixture("normalized-qc.fhir.json").deepCopy();

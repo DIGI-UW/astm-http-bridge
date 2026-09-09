@@ -166,6 +166,14 @@
                 }
               },
               "maxContains": 1
+            },
+            {
+              "contains": {
+                "required": ["url"],
+                "properties": { "url": { "const": "sourcePresent" } }
+              },
+              "minContains": 1,
+              "maxContains": 1
             }
           ]
         }
