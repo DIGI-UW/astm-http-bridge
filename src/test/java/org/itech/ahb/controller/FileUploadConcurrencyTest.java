@@ -125,6 +125,47 @@ class FileUploadConcurrencyTest {
   }
 
   @Test
+  void failedUploadBecomesRetryableAndStaysRetryableAfterStoreReopen() throws Exception {
+    Path database = directory.resolve("state.db");
+    Path file = directory.resolve("result.csv");
+    SqliteFileStateStore store = new SqliteFileStateStore(database);
+    FileMessageHandler handler = mock(FileMessageHandler.class);
+    FileWatcher watcher = watcher(handler, store);
+    String hash;
+    try {
+      doThrow(new FileMessageHandler.FileProcessingException("receiver unavailable"))
+        .when(handler)
+        .processFile(eq(file), eq(ANALYZER), eq("RESULT"), any());
+      MockHttpServletResponse response = new MockHttpServletResponse();
+
+      controller(watcher, handler).uploadFile(ANALYZER, "RESULT", multipart("original"), response);
+
+      assertTrue(response.getContentAsString().contains("Processing failed"));
+      hash = ReflectionTestUtils.invokeMethod(watcher, "calculateFileHash", file);
+      var failed = store.get(ANALYZER, hash).orElseThrow();
+      assertEquals("RETRYING", failed.status().name());
+      assertNull(failed.nextAttemptAt(), "failure must clear the upload delay for watcher retry");
+      assertEquals("original", Files.readString(file));
+    } finally {
+      watcher.stop();
+      store.close();
+    }
+
+    SqliteFileStateStore reopened = new SqliteFileStateStore(database);
+    FileMessageHandler retryHandler = mock(FileMessageHandler.class);
+    FileWatcher resumed = watcher(retryHandler, reopened);
+    try {
+      assertNull(reopened.get(ANALYZER, hash).orElseThrow().nextAttemptAt());
+      ReflectionTestUtils.invokeMethod(resumed, "processFileWithRetry", file);
+      verify(retryHandler).processFile(file, ANALYZER);
+      assertEquals("PROCESSED", reopened.get(ANALYZER, hash).orElseThrow().status().name());
+    } finally {
+      resumed.stop();
+      reopened.close();
+    }
+  }
+
+  @Test
   void deactivationDrainsUploadsAndRejectsAStaleControllerRegistration() throws Exception {
     SqliteFileStateStore store = new SqliteFileStateStore(directory.resolve("state.db"));
     FileMessageHandler handler = mock(FileMessageHandler.class);

@@ -325,7 +325,7 @@ public class SqliteFileStateStore implements FileStateStore {
         String sql = "UPDATE file_state SET next_attempt_at = ? "
                 + "WHERE analyzer_id = ? AND content_hash = ?";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, TS.format(at));
+            ps.setString(1, at == null ? null : TS.format(at));
             ps.setString(2, analyzerId);
             ps.setString(3, contentHash);
             ps.executeUpdate();
