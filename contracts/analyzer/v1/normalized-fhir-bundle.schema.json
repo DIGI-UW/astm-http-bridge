@@ -529,6 +529,18 @@
                       },
                       {
                         "contains": {
+                          "required": ["url"],
+                          "properties": {
+                            "url": {
+                              "const": "https://openelis-global.org/fhir/StructureDefinition/analyzer-result-classification"
+                            }
+                          }
+                        },
+                        "minContains": 1,
+                        "maxContains": 1
+                      },
+                      {
+                        "contains": {
                           "$ref": "#/$defs/controlRecognitionExtension"
                         },
                         "maxContains": 1

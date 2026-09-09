@@ -152,6 +152,23 @@ class AnalyzerContractArtifactsTest {
   }
 
   @Test
+  @DisplayName("normalized observations reject duplicate classification extensions")
+  void duplicateClassificationsAreRejected() throws IOException {
+    for (String fixtureName : new String[] { "normalized-known-test.fhir.json", "normalized-qc.fhir.json" }) {
+      JsonNode bundle = fixture(fixtureName);
+      var extensions = (com.fasterxml.jackson.databind.node.ArrayNode) firstObservation(bundle).path("extension");
+      JsonNode classification = findExtension(firstObservation(bundle), RESULT_CLASSIFICATION_EXTENSION).deepCopy();
+      extensions.add(classification);
+      assertFalse(validationMessages("normalized-fhir-bundle.schema.json", bundle).isEmpty());
+      ((com.fasterxml.jackson.databind.node.ObjectNode) classification).remove("valueCode");
+      assertFalse(
+        validationMessages("normalized-fhir-bundle.schema.json", bundle).isEmpty(),
+        "a malformed duplicate must not evade classification cardinality"
+      );
+    }
+  }
+
+  @Test
   @DisplayName("QC and FILE fixtures carry their required routing context")
   void qcAndFileContextIsExplicit() throws IOException {
     JsonNode qc = firstObservation(fixture("normalized-qc.fhir.json"));
