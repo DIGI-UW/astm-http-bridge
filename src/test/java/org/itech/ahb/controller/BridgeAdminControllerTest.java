@@ -15,7 +15,10 @@ import org.itech.ahb.connection.AnalyzerConnectionCatalog;
 import org.itech.ahb.connection.AnalyzerConnectionCatalog.FileDirectoryClaim;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry.AnalyzerEntry;
+import org.itech.ahb.file.FileConfig;
 import org.itech.ahb.file.FileStateStore;
+import org.itech.ahb.file.FileWatcher;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.http.HttpStatus;
@@ -26,6 +29,12 @@ class BridgeAdminControllerTest {
   Path watchDirectory;
 
   private final AnalyzerConnectionCatalog connections = mock(AnalyzerConnectionCatalog.class);
+  private final FileWatcher watcher = new FileWatcher(new FileConfig(), null, null);
+
+  @AfterEach
+  void stopWatcher() {
+    watcher.stop();
+  }
 
   @Test
   void inactiveSavedConnectionStillPreventsSharedDirectoryReset() throws Exception {
@@ -39,7 +48,7 @@ class BridgeAdminControllerTest {
       )
     );
     FileStateStore store = mock(FileStateStore.class);
-    var response = new BridgeAdminController(registry, store, connections).reset("active");
+    var response = new BridgeAdminController(registry, store, connections, watcher).reset("active");
     assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
     assertEquals("data", Files.readString(pending));
     verifyNoInteractions(store);
@@ -54,7 +63,7 @@ class BridgeAdminControllerTest {
     entry.setFilePattern("*.csv");
     AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
     registry.register("connection:http", entry);
-    var response = new BridgeAdminController(registry, null, connections).reset("http");
+    var response = new BridgeAdminController(registry, null, connections, watcher).reset("http");
     assertEquals(HttpStatus.OK, response.getStatusCode());
     assertEquals(List.of(), response.getBody().get("watchDirectories"));
     assertEquals(0, response.getBody().get("filesRemoved"));
@@ -68,6 +77,7 @@ class BridgeAdminControllerTest {
     analyzer.setBridgeConnectionId("31a62ad1-2356-4b4d-be21-b479f57a3dbf");
     analyzer.setExpectedProtocol("FILE");
     analyzer.setFilePattern("*.xlsx");
+    analyzer.setFileDirectory(watchDirectory.toString());
 
     AnalyzerRuntimeRegistry registry = mock(AnalyzerRuntimeRegistry.class);
     when(registry.getRegisteredAnalyzers()).thenReturn(
@@ -76,7 +86,7 @@ class BridgeAdminControllerTest {
     FileStateStore stateStore = mock(FileStateStore.class);
     when(stateStore.deleteAllForAnalyzer("5")).thenReturn(1);
 
-    var response = new BridgeAdminController(registry, stateStore, connections).reset("5");
+    var response = new BridgeAdminController(registry, stateStore, connections, watcher).reset("5");
 
     assertEquals(HttpStatus.OK, response.getStatusCode());
     assertEquals(1, response.getBody().get("stateRowsRemoved"));
@@ -94,7 +104,7 @@ class BridgeAdminControllerTest {
     register(registry, "second", watchDirectory.resolve("."), "second*.csv");
     FileStateStore store = mock(FileStateStore.class);
 
-    var response = new BridgeAdminController(registry, store, connections).reset("first");
+    var response = new BridgeAdminController(registry, store, connections, watcher).reset("first");
 
     assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
     assertEquals(false, response.getBody().get("reset"));
@@ -114,7 +124,7 @@ class BridgeAdminControllerTest {
     register(registry, "second", shared, "second*.csv");
     FileStateStore store = mock(FileStateStore.class);
 
-    var response = new BridgeAdminController(registry, store, connections).reset("first");
+    var response = new BridgeAdminController(registry, store, connections, watcher).reset("first");
 
     assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
     assertTrue(Files.exists(pending));
@@ -129,7 +139,7 @@ class BridgeAdminControllerTest {
     AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
     register(registry, "first", watchDirectory, "*.csv");
 
-    var response = new BridgeAdminController(registry, null, connections).reset("first");
+    var response = new BridgeAdminController(registry, null, connections, watcher).reset("first");
 
     assertEquals(HttpStatus.OK, response.getStatusCode());
     assertFalse(Files.exists(owned));
@@ -148,7 +158,7 @@ class BridgeAdminControllerTest {
     register(registry, "second", alias, "*.csv");
     FileStateStore store = mock(FileStateStore.class);
 
-    var response = new BridgeAdminController(registry, store, connections).reset("first");
+    var response = new BridgeAdminController(registry, store, connections, watcher).reset("first");
 
     assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
     assertTrue(Files.exists(pending));
@@ -161,6 +171,32 @@ class BridgeAdminControllerTest {
     entry.setBridgeConnectionId("connection-" + id);
     entry.setExpectedProtocol("FILE");
     entry.setFilePattern(pattern);
+    entry.setFileDirectory(directory.toString());
     registry.register(directory + "#connection-" + id, entry);
+  }
+
+  @Test
+  void interruptedDrainDoesNotDeleteFilesOrClearTracking() throws Exception {
+    Path pending = Files.writeString(watchDirectory.resolve("pending.csv"), "data");
+    AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
+    register(registry, "first", watchDirectory, "*.csv");
+    watcher.addWatchDirectory(watchDirectory, "*.csv", "first");
+    FileStateStore store = mock(FileStateStore.class);
+    try (var activeWork = watcher.tryClaimFile(pending, "first")) {
+      org.junit.jupiter.api.Assertions.assertNotNull(activeWork);
+      try {
+        Thread.currentThread().interrupt();
+        var response = new BridgeAdminController(registry, store, connections, watcher).reset("first");
+        assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+      assertEquals("data", Files.readString(pending));
+      verifyNoInteractions(store);
+    }
+    try (var resumed = watcher.tryClaimFile(pending, "first")) {
+      org.junit.jupiter.api.Assertions.assertNotNull(resumed, "failed reset must release its admission pause");
+    }
   }
 }

@@ -17,6 +17,7 @@ import org.itech.ahb.connection.AnalyzerConnectionCatalog;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry.AnalyzerEntry;
 import org.itech.ahb.file.FileStateStore;
+import org.itech.ahb.file.FileWatcher;
 import org.springframework.http.ResponseEntity;
 import org.springframework.lang.Nullable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -41,6 +42,7 @@ public class BridgeAdminController {
   private final AnalyzerRuntimeRegistry registry;
   private final FileStateStore fileStateStore;
   private final AnalyzerConnectionCatalog connections;
+  private final FileWatcher fileWatcher;
 
   // FileStateStore only exists when file handling is enabled
   // (StateStoreConfig is @ConditionalOnProperty bridge.file.enabled). The
@@ -50,17 +52,20 @@ public class BridgeAdminController {
   public BridgeAdminController(
     AnalyzerRuntimeRegistry registry,
     @Nullable FileStateStore fileStateStore,
-    AnalyzerConnectionCatalog connections
+    AnalyzerConnectionCatalog connections,
+    FileWatcher fileWatcher
   ) {
     this.registry = registry;
     this.fileStateStore = fileStateStore;
     this.connections = connections;
+    this.fileWatcher = fileWatcher;
   }
 
   /**
    * Reset bridge-side state for a single analyzer:
    * <ol>
    *   <li>Verify that every target directory is exclusive to this analyzer</li>
+   *   <li>Pause new FILE work and drain existing upload and watcher processing</li>
    *   <li>Delete regular files matching its saved file patterns, without following links</li>
    *   <li>Clear file tracking only after the file cleanup succeeds</li>
    * </ol>
@@ -78,52 +83,82 @@ public class BridgeAdminController {
       return ResponseEntity.badRequest().body(Map.of("reset", false, "error", "analyzerId is required"));
     }
 
-    // Match catalog -> registry lock order used by connection activation and updates.
+    // Keep saved ownership stable, but release the registry while draining:
+    // in-flight workers need registry access to finish delivery.
     synchronized (connections) {
-      synchronized (registry) {
-        return resetExclusive(analyzerId);
+      List<FileWatcher.DirectoryPause> pauses = new ArrayList<>();
+      try {
+        Map<Path, Set<String>> plan;
+        synchronized (registry) {
+          plan = exclusiveDirectoryPlan(analyzerId);
+        }
+        for (Path directory : plan.keySet()) {
+          pauses.add(fileWatcher.pauseDirectory(directory));
+        }
+        synchronized (registry) {
+          if (!plan.equals(exclusiveDirectoryPlan(analyzerId))) {
+            throw new IllegalArgumentException("FILE ownership changed while preparing reset; retry reset");
+          }
+          return resetExclusive(analyzerId, plan);
+        }
+      } catch (IOException | IllegalArgumentException exception) {
+        return ResponseEntity.status(409).body(Map.of("reset", false, "error", exception.getMessage()));
+      } finally {
+        for (int index = pauses.size() - 1; index >= 0; index--) {
+          pauses.get(index).close();
+        }
       }
     }
   }
 
-  private ResponseEntity<Map<String, Object>> resetExclusive(String analyzerId) {
+  private Map<Path, Set<String>> exclusiveDirectoryPlan(String analyzerId) throws IOException {
     Map<Path, List<AnalyzerEntry>> byDirectory = new LinkedHashMap<>();
-    Set<Path> files = new LinkedHashSet<>();
-    List<String> watchDirs = new ArrayList<>();
-    try {
-      for (var claim : connections.fileDirectoryClaims()) {
-        Path directory = claim.directory().toAbsolutePath().normalize();
-        if (Files.exists(directory)) directory = directory.toRealPath();
-        AnalyzerEntry owner = new AnalyzerEntry();
-        owner.setId(claim.analyzerId());
-        owner.setFilePattern(claim.filePattern());
-        byDirectory.computeIfAbsent(directory, ignored -> new ArrayList<>()).add(owner);
+    for (var claim : connections.fileDirectoryClaims()) {
+      Path directory = claim.directory().toFile().getCanonicalFile().toPath();
+      AnalyzerEntry owner = new AnalyzerEntry();
+      owner.setId(claim.analyzerId());
+      owner.setFilePattern(claim.filePattern());
+      byDirectory.computeIfAbsent(directory, ignored -> new ArrayList<>()).add(owner);
+    }
+    // Include active settings too: a saved edit may not have been activated yet.
+    for (AnalyzerEntry entry : registry.getRegisteredAnalyzers().values()) {
+      if ("HTTP".equals(entry.getInboundTransport())) continue;
+      if (!"FILE".equalsIgnoreCase(entry.getExpectedProtocol())) continue;
+      if (entry.getFileDirectory() == null || entry.getFileDirectory().isBlank()) {
+        throw new IllegalArgumentException("Active FILE connection has no saved directory");
       }
-      // Include active settings too: a saved edit may not have been activated yet.
-      for (Map.Entry<String, AnalyzerEntry> registration : registry.getRegisteredAnalyzers().entrySet()) {
-        AnalyzerEntry entry = registration.getValue();
-        if ("HTTP".equals(entry.getInboundTransport())) continue;
-        if (
-          !"FILE".equalsIgnoreCase(entry.getExpectedProtocol()) && !"CSV".equalsIgnoreCase(entry.getExpectedProtocol())
-        ) continue;
-        Path directory = watchDirectory(registration.getKey(), entry).toAbsolutePath().normalize();
-        if (Files.exists(directory)) directory = directory.toRealPath();
-        byDirectory.computeIfAbsent(directory, ignored -> new ArrayList<>()).add(entry);
+      Path directory = Path.of(entry.getFileDirectory()).toFile().getCanonicalFile().toPath();
+      byDirectory.computeIfAbsent(directory, ignored -> new ArrayList<>()).add(entry);
+    }
+    Map<Path, Set<String>> plan = new LinkedHashMap<>();
+    for (Map.Entry<Path, List<AnalyzerEntry>> directory : byDirectory.entrySet()) {
+      List<AnalyzerEntry> owners = directory.getValue();
+      if (owners.stream().noneMatch(entry -> analyzerId.equals(entry.getId()))) continue;
+      if (owners.stream().anyMatch(entry -> !analyzerId.equals(entry.getId()))) {
+        throw new IllegalArgumentException("Cannot reset a directory shared by multiple analyzers");
       }
-      // Build the entire cleanup plan before deleting even the first file or tracking row.
-      for (Map.Entry<Path, List<AnalyzerEntry>> directory : byDirectory.entrySet()) {
-        List<AnalyzerEntry> owners = directory.getValue();
-        if (owners.stream().noneMatch(entry -> analyzerId.equals(entry.getId()))) continue;
-        if (owners.stream().anyMatch(entry -> !analyzerId.equals(entry.getId()))) {
-          throw new IllegalArgumentException("Cannot reset a directory shared by multiple analyzers");
+      Set<String> patterns = new LinkedHashSet<>();
+      for (AnalyzerEntry owner : owners) {
+        String pattern = owner.getFilePattern();
+        if (pattern == null || pattern.isBlank()) {
+          throw new IllegalArgumentException("Cannot reset without a saved file pattern");
         }
+        FileSystems.getDefault().getPathMatcher("glob:" + pattern);
+        patterns.add(pattern);
+      }
+      plan.put(directory.getKey(), patterns);
+    }
+    return plan;
+  }
+
+  private ResponseEntity<Map<String, Object>> resetExclusive(String analyzerId, Map<Path, Set<String>> plan) {
+    Set<Path> files = new LinkedHashSet<>();
+    List<String> watchDirs = plan.keySet().stream().map(Path::toString).toList();
+    try {
+      // Enumerate only after all directories are drained, before deleting any file.
+      for (var directory : plan.entrySet()) {
         Path dir = directory.getKey();
-        watchDirs.add(dir.toString());
-        for (AnalyzerEntry owner : owners) {
-          String pattern = owner.getFilePattern();
-          if (pattern == null || pattern.isBlank()) {
-            throw new IllegalArgumentException("Cannot reset without a saved file pattern");
-          }
+        for (String pattern : directory.getValue()) {
           var matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
           if (!Files.isDirectory(dir)) continue;
           try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
@@ -169,16 +204,5 @@ public class BridgeAdminController {
       watchDirs
     );
     return ResponseEntity.ok(body);
-  }
-
-  private Path watchDirectory(String registryKey, AnalyzerEntry entry) {
-    String connectionId = entry.getBridgeConnectionId();
-    if (connectionId != null && !connectionId.isBlank()) {
-      String suffix = "#" + connectionId;
-      if (registryKey.endsWith(suffix)) {
-        return Path.of(registryKey.substring(0, registryKey.length() - suffix.length()));
-      }
-    }
-    return Path.of(registryKey);
   }
 }
