@@ -373,6 +373,19 @@ openelis-analyzer-bridge/
 - `docs/SCOPE_AND_NAMING.md`: canonical naming + compatibility policy
 - `docs/ASTM_MESSAGE_PROCESSING_FLOW.md`: ASTM flow details (OpenELIS-side processing)
 
+### Checkpoint fixtures and the final repository pair
+
+The analyzer-mock revision in `.github/workflows/test.yml` is the exact fixture
+version used to validate this Bridge checkpoint. Earlier checkpoints may pin an
+earlier compatible fixture revision; that is not a claim about the final stack's
+deployment dependencies. Do not move every checkpoint to the newest mock revision
+without checking that its profile and result contracts are supported there.
+
+For final-stack validation, use the mock revision pinned by the top Bridge
+checkpoint and verify that the OpenELIS follow-up pins that same mock revision
+and the exact final Bridge commit. Report checkpoint test evidence separately
+from checks on that final repository pair.
+
 ## License / Contributing
 
 TBD (add project license and contribution guidelines).
