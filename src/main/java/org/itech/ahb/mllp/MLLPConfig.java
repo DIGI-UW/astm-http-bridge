@@ -4,7 +4,8 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * Configuration properties for the MLLP (Minimal Lower Layer Protocol) server.
+ * Enables saved-connection MLLP (Minimal Lower Layer Protocol) listeners.
+ * Listening ports belong to saved connection values, not global configuration.
  * <p>
  * MLLP is the standard transport layer for HL7 v2.x messages over TCP.
  * It uses specific framing characters:
@@ -19,15 +20,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class MLLPConfig {
 
     /**
-     * Whether the MLLP server is enabled.
+     * Whether saved HL7 server connections may start MLLP listeners.
      * Defaults to false for safety; production deployments should explicitly enable
      * via the MLLP_ENABLED environment variable.
      */
     private boolean enabled = false;
 
-    /**
-     * The port on which the MLLP server listens.
-     * Default is 2575 (standard HL7 MLLP port).
-     */
-    private int port = 2575;
 }

@@ -1,6 +1,7 @@
 package org.itech.ahb.controller;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -20,10 +21,11 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
-import org.itech.ahb.config.AnalyzerRegistryConfig;
-import org.itech.ahb.config.AnalyzerRegistryConfig.AnalyzerEntry;
+import org.itech.ahb.connection.AnalyzerRuntimeRegistry;
+import org.itech.ahb.connection.AnalyzerRuntimeRegistry.AnalyzerEntry;
 import org.itech.ahb.fhir.FileNameSelfDeclarationScanner;
 import org.itech.ahb.file.FileMessageHandler;
+import org.itech.ahb.file.FileConfig;
 import org.itech.ahb.file.FileMessageHandler.FileProcessingException;
 import org.itech.ahb.file.FileStateStore;
 import org.itech.ahb.file.FileWatcher;
@@ -62,7 +64,7 @@ class FileUploadControllerTest {
     @TempDir
     Path tempDir;
 
-    private AnalyzerRegistryConfig registry;
+    private AnalyzerRuntimeRegistry registry;
     private FileMessageHandler fileMessageHandler;
     private FileNameSelfDeclarationScanner scanner;
     private FileWatcher fileWatcher;
@@ -71,8 +73,8 @@ class FileUploadControllerTest {
     private FileUploadController controller;
 
     @BeforeEach
-    void setUp() {
-        registry = org.mockito.Mockito.mock(AnalyzerRegistryConfig.class);
+    void setUp() throws Exception {
+        registry = org.mockito.Mockito.mock(AnalyzerRuntimeRegistry.class);
         fileMessageHandler = org.mockito.Mockito.mock(FileMessageHandler.class);
         scanner = org.mockito.Mockito.mock(FileNameSelfDeclarationScanner.class);
         fileWatcher = org.mockito.Mockito.mock(FileWatcher.class);
@@ -83,12 +85,17 @@ class FileUploadControllerTest {
         entry.setId(ANALYZER_ID);
         entry.setName("QuantStudio 5 Arbo");
         entry.setExpectedProtocol("FILE");
+        entry.setFileDirectory(tempDir.toString());
         entry.setMappedTestCodes(Set.of(TEST_CODE));
 
         Map<String, AnalyzerEntry> registered = new LinkedHashMap<>();
-        registered.put(tempDir.toString(), entry);
+        registered.put(tempDir.resolve("registration-only#connection-42").toString(), entry);
         when(registry.getRegisteredAnalyzers()).thenReturn(registered);
         when(fileWatcher.getStateStore()).thenReturn(stateStore);
+        FileWatcher claimOwner = new FileWatcher(new FileConfig(), fileMessageHandler, null);
+        claimOwner.addWatchDirectory(tempDir, "*", ANALYZER_ID);
+        when(fileWatcher.tryClaimFile(any(Path.class), anyString())).thenAnswer(invocation ->
+                claimOwner.tryClaimFile(invocation.getArgument(0), invocation.getArgument(1)));
 
         controller = new FileUploadController(registry, fileMessageHandler, scanner, fileWatcher);
     }
@@ -97,6 +104,21 @@ class FileUploadControllerTest {
         return new MockMultipartFile("file", FILENAME,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 content.getBytes());
+    }
+
+    @Test
+    void uploadUsesSavedDirectoryRatherThanTheOpaqueRegistrationKey() throws Exception {
+        MockMultipartFile file = multipart("saved directory evidence");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        controller.uploadFile(ANALYZER_ID, TEST_CODE, file, response);
+
+        assertEquals(200, response.getStatus());
+        assertEquals("saved directory evidence", java.nio.file.Files.readString(tempDir.resolve(FILENAME)));
+        assertFalse(java.nio.file.Files.exists(tempDir.resolve("registration-only#connection-42")));
+        assertEquals(tempDir.toString(), controller.listFileAnalyzers().getBody().get(0).get("watchDirectory"));
+        verify(fileMessageHandler).processFile(eq(tempDir.resolve(FILENAME)), eq(ANALYZER_ID),
+                eq(TEST_CODE), any(FileMessageHandler.ProgressCallback.class));
     }
 
     @Nested

@@ -6,8 +6,9 @@
 # CONFIGURATION FORMATS:
 #
 # 1. Bridge runtime settings (bridge.*)
-#    Used by: security, analyzer registry, file watcher.
-#    Properties: bridge.file.*, bridge.analyzers.*, bridge.security.*
+#    Used by: security, profile catalog, durable connections, and FILE runtime.
+#    Properties: bridge.file.*, bridge.profile-catalog.*, bridge.connection-catalog.*,
+#    bridge.security.*
 #
 # 2. OpenELIS forwarding settings (org.itech.ahb.forward-http-server.*)
 #    Used by: HttpForwardingRouter, FILE FHIR forwarding, registry bootstrap,
@@ -17,6 +18,9 @@
 
 # Bridge Configuration (NEW FORMAT - v2.0+)
 bridge:
+  http:
+    # Comma-separated proxy IPs; empty means forwarded identity headers are ignored.
+    trusted-proxies: ${BRIDGE_HTTP_TRUSTED_PROXIES:}
   # Security configuration for the /input HTTP endpoint (M7.1)
   # Protects against unauthorized data injection via the HTTP transport.
   # Non-HTTP transports (ASTM/TCP, MLLP, Serial, File) are unaffected.
@@ -30,62 +34,24 @@ bridge:
     username: bridge                            # HTTP Basic username
     password: ${BRIDGE_AUTH_PASSWORD:changeme}   # Set via env var in production
 
-  # Analyzer identification registry (M7: Message Normalizer)
-  # Maps source identifiers (IP addresses, serial ports, file paths) to analyzer IDs.
-  # The AnalyzerIdentifier service uses these mappings to identify analyzers before routing.
-  # If no match is found, OpenELIS will identify the analyzer from message content (e.g., MSH-3/MSH-4 for HL7).
-  #
-  # Key types:
-  #   - IP addresses: Exact match (e.g., "192.168.1.10")
-  #   - Serial port paths: Exact match (e.g., "/dev/ttyUSB0")
-  #   - Glob patterns: Wildcard match for file paths (e.g., "quantstudio-*" matches "quantstudio-20260205.csv")
-  analyzers: {}
-  # Example configuration (uncomment and modify as needed):
-  #   "192.168.1.10":
-  #     id: MINDRAY-BC5380-001
-  #     name: "Mindray BC-5380"
-  #     expectedProtocol: ASTM
-  #   "192.168.1.11":
-  #     id: SYSMEX-XN-001
-  #     name: "Sysmex XN-1000"
-  #     expectedProtocol: HL7
-  #   "/dev/ttyUSB0":
-  #     id: HORIBA-PENTRA60-001
-  #     name: "Horiba Pentra 60"
-  #     expectedProtocol: ASTM
-  #   "quantstudio-*":
-  #     id: QUANTSTUDIO-001
-  #     name: "QuantStudio 7 Flex"
-  #     expectedProtocol: CSV
-  #     filePattern: ".*/quantstudio-.*\\.csv"
+  # Bridge-owned immutable analyzer profile revisions. Site-created revisions
+  # must remain under the image's declared persistent /data volume.
+  profile-catalog:
+    directory: ${BRIDGE_PROFILE_CATALOG_DIRECTORY:/data/openelis-analyzer-bridge/profile-catalog}
+    shipped-pattern: classpath*:/analyzer-profiles/**/*.json
 
-  # File watcher configuration (M4)
-  # Runtime ownership note (014 remediation): Bridge is the active FILE watcher owner.
-  # OpenELIS app-side poller is fallback-only and disabled by default.
+  connection-catalog:
+    directory: ${BRIDGE_CONNECTION_CATALOG_DIRECTORY:/data/openelis-analyzer-bridge/connections}
+
+  # Process-wide FILE runtime settings. Durable analyzer connections supply
+  # their profile-owned directory, pattern, parser, and mapping values.
   file:
-    enabled: false  # Bootstrap default; watcher is activated by FILE registration lifecycle during remediation
-    watchDirectories:
-      - /mnt/analyzer-import/quantstudio
-      - /mnt/analyzer-import/hain
-    archiveDirectory: /mnt/analyzer-archive
-    errorDirectory: /mnt/analyzer-error
+    enabled: true
+    stateStorePath: ${BRIDGE_FILE_STATE_STORE_PATH:/data/openelis-analyzer-bridge/file-state.db}
     pollIntervalMs: 5000
     fileStabilityTimeoutMs: 3000
     maxRetryAttempts: 3
     retryDelayMs: 1000
-    filePatterns:
-      - "*.csv"
-      - "*.hl7"
-      - "*.txt"
-    # Per-analyzer CSV column mappings (optional)
-    csvMappings:
-      QUANTSTUDIO-001:
-        sampleId: 0
-        testCode: 1
-        result: 2
-        units: 3
-        timestamp: 4
-        flags: 5
 
 # OpenELIS forwarding configuration
 # NOTE: All bridge → OpenELIS transport forwarding uses this single configuration path.
@@ -93,10 +59,10 @@ org:
   itech:
     ahb:
       forward-http-server:
-        # URI of the OpenELIS base endpoint (HttpForwardingRouter appends protocol paths)
-        # Base path only - router appends /astm, /hl7, /csv, /raw per message protocol
-        # FILE forwarding also derives /analyzer/fhir from this same base path.
-        # Example: http://localhost:8080/api/OpenELIS-Global/analyzer → /analyzer/astm, /analyzer/hl7, /analyzer/fhir
+        # Base URI for normalized result delivery. Bridge appends /fhir for all
+        # supported protocols and transports.
+        # Example: http://localhost:8080/api/OpenELIS-Global/analyzer
+        #       -> http://localhost:8080/api/OpenELIS-Global/analyzer/fhir
         uri: http://localhost:8080/api/OpenELIS-Global/analyzer
         username:
         password:
@@ -105,6 +71,9 @@ org:
         read-timeout-seconds: 30
         max-attempts: 3
         backoff-ms: 1000
+
+      astm:
+        enabled: true
 
       # ASTM LIS1-A Server - Listens for ASTM messages from analyzers
       listen-astm-server:
@@ -122,10 +91,9 @@ org:
         host-name: localhost
         port: 5000
 
-      # MLLP (HL7 v2.x) Listener - Concurrent connections on single port
+      # Saved HL7 server connections own their individual listening ports.
       mllp:
-        enabled: false  # Set to true to enable MLLP listener
-        port: 2575      # Standard HL7 MLLP port (IANA registered)
+        enabled: false  # Permit activation of saved HL7 listeners when true
         # Rate limiting: per source IP, prevents flooding
         # rateLimit:
         #   messagesPerSecond: 10
@@ -141,6 +109,7 @@ org:
 # Server configuration
 server:
   port: 8443
+  forward-headers-strategy: none
 
 # Logging configuration
 logging:
@@ -151,7 +120,7 @@ logging:
 # Actuator endpoints for health monitoring and metrics
 # NOTE: Health and info endpoints are publicly accessible. Other actuator endpoints
 # are also public by default but can be network-restricted in production.
-# The /input endpoint requires HTTP Basic auth (see bridge.security above).
+# The /input and /api/profiles endpoints require HTTP Basic auth (see bridge.security above).
 management:
   endpoints:
     web:

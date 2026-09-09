@@ -51,7 +51,6 @@ class HapiMLLPListenerTest {
     void setUp() {
         testPort = PORT_COUNTER.getAndIncrement();
         config = new MLLPConfig();
-        config.setPort(testPort);
         config.setEnabled(true);
     }
 
@@ -72,7 +71,7 @@ class HapiMLLPListenerTest {
         void shouldHandleValidMLLPMessage() throws Exception {
             // Given: A test router that records received envelopes
             TestMessageRouter testRouter = new TestMessageRouter();
-            listener = new HapiMLLPListener(config, testRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", testRouter);
             listener.start();
             waitForServerReady(testPort);
 
@@ -94,12 +93,12 @@ class HapiMLLPListenerTest {
         }
 
         @Test
-        @DisplayName("Should extract source IP from connection")
+        @DisplayName("Should preserve the saved listener source binding")
         @Timeout(15)
         void shouldExtractSourceIP() throws Exception {
             // Given: A test router
             TestMessageRouter testRouter = new TestMessageRouter();
-            listener = new HapiMLLPListener(config, testRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", testRouter);
             listener.start();
             waitForServerReady(testPort);
 
@@ -108,17 +107,13 @@ class HapiMLLPListenerTest {
             // When: Sending from localhost
             sendMLLPMessage("localhost", testPort, hl7Message);
 
-            // Then: Source IP should be captured in envelope
+            // The peer address must not replace the saved listener identity.
             assertTrue(testRouter.awaitMessage(5, TimeUnit.SECONDS));
             MessageEnvelope envelope = testRouter.getLastEnvelope();
             assertNotNull(envelope);
             String sourceId = envelope.getSourceId();
             assertNotNull(sourceId);
-            assertTrue(
-                sourceId.equals("127.0.0.1") || sourceId.equals("localhost") ||
-                sourceId.startsWith("0:0:0:0") || sourceId.equals("::1"),
-                "Source IP should be localhost variant, got: " + sourceId
-            );
+            assertEquals("connection:test", sourceId);
         }
 
         @Test
@@ -127,7 +122,7 @@ class HapiMLLPListenerTest {
         void shouldHandleMultipleMessages() throws Exception {
             // Given: A test router
             TestMessageRouter testRouter = new TestMessageRouter();
-            listener = new HapiMLLPListener(config, testRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", testRouter);
             listener.start();
             waitForServerReady(testPort);
 
@@ -161,35 +156,34 @@ class HapiMLLPListenerTest {
         void shouldExtractAnalyzerIdUsingHapiTerser() throws Exception {
             // Given: A HAPI receiving application
             TestMessageRouter testRouter = new TestMessageRouter();
-            HapiReceivingApplication app = new HapiReceivingApplication(testRouter);
+            HapiReceivingApplication app = new HapiReceivingApplication(testRouter, "connection:test");
 
             // Given: HL7 message with Sending Application in MSH-3
             String hl7Message = "MSH|^~\\&|SYSMEX-XN|LAB1|DestApp|DestFac|20260205120000||ORM^O01|123|P|2.5.1\r";
             Message message = new PipeParser().parse(hl7Message);
 
             // When: Extracting analyzer ID
-            String analyzerId = app.extractAnalyzerId(message, "192.168.1.1");
+            String analyzerId = app.extractAnalyzerId(message);
 
             // Then: Should extract from MSH-3 and MSH-4
             assertEquals("SYSMEX-XN-LAB1", analyzerId);
         }
 
         @Test
-        @DisplayName("Should fallback to source IP when MSH fields are empty")
-        void shouldFallbackToSourceIP() throws Exception {
+        @DisplayName("Should leave the protocol sender empty when MSH fields are empty")
+        void shouldNotInventAProtocolSenderFromTheSourceIP() throws Exception {
             // Given: A HAPI receiving application
             TestMessageRouter testRouter = new TestMessageRouter();
-            HapiReceivingApplication app = new HapiReceivingApplication(testRouter);
+            HapiReceivingApplication app = new HapiReceivingApplication(testRouter, "connection:test");
 
             // Given: HL7 message with empty MSH-3 and MSH-4
             String hl7Message = "MSH|^~\\&|||DestApp|DestFac|20260205120000||ORM^O01|123|P|2.5.1\r";
             Message message = new PipeParser().parse(hl7Message);
 
             // When: Extracting analyzer ID
-            String analyzerId = app.extractAnalyzerId(message, "192.168.1.50");
+            String analyzerId = app.extractAnalyzerId(message);
 
-            // Then: Should use source IP
-            assertEquals("192.168.1.50", analyzerId);
+            assertNull(analyzerId);
         }
 
         @Test
@@ -198,7 +192,7 @@ class HapiMLLPListenerTest {
         void shouldGenerateProperlyFormedACK() throws Exception {
             // Given: A listener
             TestMessageRouter testRouter = new TestMessageRouter();
-            listener = new HapiMLLPListener(config, testRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", testRouter);
             listener.start();
             waitForServerReady(testPort);
 
@@ -244,7 +238,7 @@ class HapiMLLPListenerTest {
             // Given: A router that always fails
             TestMessageRouter failingRouter = new TestMessageRouter();
             failingRouter.setAlwaysFail(true);
-            listener = new HapiMLLPListener(config, failingRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", failingRouter);
             listener.start();
             waitForServerReady(testPort);
 
@@ -266,7 +260,7 @@ class HapiMLLPListenerTest {
         void shouldExtractSourceIpFromMetadata() {
             // Given: A HAPI receiving application
             TestMessageRouter testRouter = new TestMessageRouter();
-            HapiReceivingApplication app = new HapiReceivingApplication(testRouter);
+            HapiReceivingApplication app = new HapiReceivingApplication(testRouter, "connection:test");
 
             // Given: Metadata with SENDING_IP
             Map<String, Object> metadata = new HashMap<>();
@@ -284,7 +278,7 @@ class HapiMLLPListenerTest {
         void shouldReturnUnknownWhenNoSourceIp() {
             // Given: A HAPI receiving application
             TestMessageRouter testRouter = new TestMessageRouter();
-            HapiReceivingApplication app = new HapiReceivingApplication(testRouter);
+            HapiReceivingApplication app = new HapiReceivingApplication(testRouter, "connection:test");
 
             // Given: Metadata without SENDING_IP
             Map<String, Object> metadata = new HashMap<>();
@@ -307,7 +301,7 @@ class HapiMLLPListenerTest {
         void shouldStartAndStopGracefully() throws Exception {
             // Given: A listener
             TestMessageRouter testRouter = new TestMessageRouter();
-            listener = new HapiMLLPListener(config, testRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", testRouter);
 
             // When: Starting
             listener.start();
@@ -331,7 +325,7 @@ class HapiMLLPListenerTest {
         void shouldRejectConnectionsAfterStop() throws Exception {
             // Given: A running listener
             TestMessageRouter testRouter = new TestMessageRouter();
-            listener = new HapiMLLPListener(config, testRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", testRouter);
             listener.start();
             waitForServerReady(testPort);
 
@@ -359,7 +353,7 @@ class HapiMLLPListenerTest {
         void shouldNotCrashOnDoubleStop() throws Exception {
             // Given: A running listener
             TestMessageRouter testRouter = new TestMessageRouter();
-            listener = new HapiMLLPListener(config, testRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", testRouter);
             listener.start();
             waitForServerReady(testPort);
 
@@ -379,7 +373,7 @@ class HapiMLLPListenerTest {
         void shouldRateLimitRapidMessages() throws Exception {
             // Given: A listener
             TestMessageRouter testRouter = new TestMessageRouter();
-            listener = new HapiMLLPListener(config, testRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", testRouter);
             listener.start();
             waitForServerReady(testPort);
 
@@ -414,7 +408,7 @@ class HapiMLLPListenerTest {
         void shouldCleanupOldEntries() throws Exception {
             // Given: A rate limiter
             TestMessageRouter testRouter = new TestMessageRouter();
-            HapiReceivingApplication app = new HapiReceivingApplication(testRouter);
+            HapiReceivingApplication app = new HapiReceivingApplication(testRouter, "connection:test");
             RateLimitingReceivingApplication rateLimiter = new RateLimitingReceivingApplication(app);
 
             try {
@@ -438,7 +432,6 @@ class HapiMLLPListenerTest {
         void shouldHaveSensibleDefaults() {
             MLLPConfig defaultConfig = new MLLPConfig();
 
-            assertEquals(2575, defaultConfig.getPort(), "Default port should be 2575");
             assertFalse(defaultConfig.isEnabled(), "Should be disabled by default");
         }
     }
@@ -453,7 +446,7 @@ class HapiMLLPListenerTest {
         void shouldPopulateEnvelopeWithAllFields() throws Exception {
             // Given: A listener
             TestMessageRouter testRouter = new TestMessageRouter();
-            listener = new HapiMLLPListener(config, testRouter);
+            listener = new HapiMLLPListener(testPort, "connection:test", testRouter);
             listener.start();
             waitForServerReady(testPort);
 
@@ -473,8 +466,8 @@ class HapiMLLPListenerTest {
             assertNotNull(envelope.getReceivedAt(), "Received timestamp should be set");
             assertEquals("SYSMEX-XN-LAB1", envelope.getProtocolAnalyzerHint(),
                 "Protocol analyzer hint should be extracted from MSH-3 and MSH-4");
-            assertNull(envelope.getAnalyzerId(),
-                "Canonical analyzer ID is resolved later by MessageNormalizer");
+            assertNull(envelope.getResolvedAnalyzerId(),
+                "Saved connection identity is resolved later by MessageNormalizer");
         }
     }
 

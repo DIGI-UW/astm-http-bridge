@@ -2,6 +2,18 @@
 # WireMock at 172.28.0.200:8080 acts as OpenELIS capture server
 
 bridge:
+  security:
+    enabled: true
+    username: bridge
+    password: changeme
+
+  profile-catalog:
+    directory: /data/openelis-analyzer-bridge/profile-catalog
+    shipped-pattern: classpath*:/analyzer-profiles/**/*.json
+
+  connection-catalog:
+    directory: /data/openelis-analyzer-bridge/connections
+
   openelis:
     url: http://172.28.0.200:8080
     connectTimeoutSeconds: 10
@@ -10,23 +22,13 @@ bridge:
       maxAttempts: 1
       backoffMs: 500
 
-  analyzers: {}
-  # Analyzer identification is optional — messages route without explicit mappings.
-  # OpenELIS identifies analyzers from message content (e.g., MSH-3/MSH-4 for HL7).
-
   file:
     enabled: true
-    watchDirectories:
-      - /mnt/analyzer-import
-    archiveDirectory: /mnt/analyzer-archive
-    errorDirectory: /mnt/analyzer-error
+    stateStorePath: /tmp/openelis-analyzer-bridge/file-state.db
     pollIntervalMs: 2000
     fileStabilityTimeoutMs: 2000
     maxRetryAttempts: 2
     retryDelayMs: 500
-    filePatterns:
-      - "*.csv"
-      - "*.hl7"
 
 org:
   itech:
@@ -48,7 +50,6 @@ org:
 
       mllp:
         enabled: true
-        port: 2575
 
 server:
   port: 8443
@@ -68,7 +69,7 @@ management:
       show-details: always
   health:
     mllp:
-      enabled: true
+      enabled: false
     serial:
       enabled: true
     filewatcher:

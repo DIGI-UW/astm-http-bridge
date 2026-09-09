@@ -15,13 +15,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.itech.ahb.config.properties.HTTPForwardServerConfigurationProperties;
-import org.itech.ahb.config.properties.SerialConfigurationProperties;
+import org.itech.ahb.connection.AnalyzerRuntimeRegistry;
+import org.itech.ahb.connection.SerialConnectionSettings;
 import org.itech.ahb.normalizer.AnalyzerIdentifier;
 import org.itech.ahb.normalizer.MessageNormalizer;
 import org.itech.ahb.routing.HttpForwardingRouter;
-import org.itech.ahb.config.properties.SerialConfigurationProperties.Parity;
-import org.itech.ahb.config.properties.SerialConfigurationProperties.ProtocolMode;
-import org.itech.ahb.config.properties.SerialConfigurationProperties.SerialPortConfig;
+import org.itech.ahb.profile.AstmResultRecordSelection;
+import org.itech.ahb.profile.ControlResultRecognition;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -84,15 +84,16 @@ class SerialIntegrationTest {
         httpServer.createContext("/api/OpenELIS-Global/analyzer/", exchange -> {
             String path = exchange.getRequestURI().getPath();
             String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
-            String sourceId = exchange.getRequestHeaders().getFirst(HttpForwardingRouter.HEADER_SOURCE_ID);
-            String transport = exchange.getRequestHeaders().getFirst(HttpForwardingRouter.HEADER_SOURCE_TRANSPORT);
+            boolean hasSourceHeaders = exchange.getRequestHeaders().keySet().stream()
+                .map(String::toLowerCase)
+                .anyMatch(name -> name.startsWith("x-source-") || name.equals("x-analyzer-id"));
 
             String body;
             try (InputStream is = exchange.getRequestBody()) {
                 body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
             }
 
-            receivedMessages.add(new ReceivedMessage(path, body, contentType, sourceId, transport));
+            receivedMessages.add(new ReceivedMessage(path, body, contentType, hasSourceHeaders));
             messageLatch.countDown();
 
             exchange.sendResponseHeaders(200, 2);
@@ -135,7 +136,7 @@ class SerialIntegrationTest {
         @AfterEach
         void tearDown() {
             if (listener != null) {
-                listener.stop();
+                listener.stopAll();
             }
         }
 
@@ -145,35 +146,20 @@ class SerialIntegrationTest {
             assumeTrue(testPort != null, "SERIAL_TEST_PORT not set");
             assumeTrue(testPortPair != null, "SERIAL_TEST_PORT_PAIR not set");
 
-            // Configure the listener
-            SerialConfigurationProperties config = new SerialConfigurationProperties();
-            config.setEnabled(true);
-
-            SerialPortConfig portConfig = new SerialPortConfig();
-            portConfig.setPath(testPort);
-            portConfig.setBaudRate(9600);
-            portConfig.setDataBits(8);
-            portConfig.setStopBits(1);
-            portConfig.setParity(Parity.NONE);
-            portConfig.setProtocol(ProtocolMode.ASTM);
-            portConfig.setAnalyzerId("TEST-ANALYZER");
-
-            config.setPorts(List.of(portConfig));
-
             // Create HTTP config and wire M7 pipeline: HttpForwardingRouter -> MessageNormalizer -> SerialMessageHandler
             HTTPForwardServerConfigurationProperties httpConfig = new HTTPForwardServerConfigurationProperties();
             httpConfig.setUri(java.net.URI.create("http://localhost:" + serverPort + "/api/OpenELIS-Global/analyzer"));
 
-            HttpForwardingRouter forwardingRouter = new HttpForwardingRouter(httpConfig, null, null, null);
-            AnalyzerIdentifier identifier = new AnalyzerIdentifier(null);
-            MessageNormalizer normalizer = new MessageNormalizer(forwardingRouter, identifier, null);
-            SerialMessageHandler handler = new SerialMessageHandler(normalizer);
+            SerialMessageHandler handler = normalizedHandler(httpConfig, "ASTM");
 
-            listener = new SerialPortListener(config, handler);
-            listener.start();
-
-            // Wait for port to open
-            Thread.sleep(1000);
+            listener = new SerialPortListener(handler);
+            listener.start(
+                "serial-it",
+                "connection:serial-it",
+                "TEST-ANALYZER",
+                testPort,
+                serialSettings("ASTM")
+            );
 
             // Send ASTM message via the paired port
             sendASTMMessage(testPortPair);
@@ -185,10 +171,11 @@ class SerialIntegrationTest {
             // Verify message
             assertEquals(1, receivedMessages.size());
             ReceivedMessage msg = receivedMessages.get(0);
-            assertEquals("/api/OpenELIS-Global/analyzer/astm", msg.path);
-            assertEquals("SERIAL", msg.transport);
-            assertEquals(testPort, msg.sourceId);
-            assertTrue(msg.body.contains("H|\\^&"));
+            assertEquals("/api/OpenELIS-Global/analyzer/fhir", msg.path);
+            assertFalse(msg.hasSourceHeaders);
+            assertTrue(msg.body.contains("bridge-serial-it"));
+            assertTrue(msg.body.contains("WBC"));
+            assertTrue(msg.body.contains("\"valueCode\":\"SERIAL\""));
         }
 
         @Test
@@ -197,29 +184,19 @@ class SerialIntegrationTest {
             assumeTrue(testPort != null, "SERIAL_TEST_PORT not set");
             assumeTrue(testPortPair != null, "SERIAL_TEST_PORT_PAIR not set");
 
-            // Configure for HL7
-            SerialConfigurationProperties config = new SerialConfigurationProperties();
-            config.setEnabled(true);
-
-            SerialPortConfig portConfig = new SerialPortConfig();
-            portConfig.setPath(testPort);
-            portConfig.setBaudRate(9600);
-            portConfig.setProtocol(ProtocolMode.HL7);
-
-            config.setPorts(List.of(portConfig));
-
             HTTPForwardServerConfigurationProperties httpConfig = new HTTPForwardServerConfigurationProperties();
             httpConfig.setUri(java.net.URI.create("http://localhost:" + serverPort + "/api/OpenELIS-Global/analyzer"));
 
-            HttpForwardingRouter forwardingRouter = new HttpForwardingRouter(httpConfig, null, null, null);
-            AnalyzerIdentifier identifier = new AnalyzerIdentifier(null);
-            MessageNormalizer normalizer = new MessageNormalizer(forwardingRouter, identifier, null);
-            SerialMessageHandler handler = new SerialMessageHandler(normalizer);
+            SerialMessageHandler handler = normalizedHandler(httpConfig, "HL7");
 
-            listener = new SerialPortListener(config, handler);
-            listener.start();
-
-            Thread.sleep(1000);
+            listener = new SerialPortListener(handler);
+            listener.start(
+                "serial-it",
+                "connection:serial-it",
+                "TEST-ANALYZER",
+                testPort,
+                serialSettings("HL7")
+            );
 
             // Send HL7 message
             sendHL7Message(testPortPair);
@@ -229,47 +206,30 @@ class SerialIntegrationTest {
 
             assertEquals(1, receivedMessages.size());
             ReceivedMessage msg = receivedMessages.get(0);
-            assertEquals("/api/OpenELIS-Global/analyzer/hl7", msg.path);
-            assertTrue(msg.body.startsWith("MSH|"));
+            assertEquals("/api/OpenELIS-Global/analyzer/fhir", msg.path);
+            assertTrue(msg.body.contains("bridge-serial-it"));
+            assertTrue(msg.body.contains("WBC"));
         }
 
-        @Test
-        @DisplayName("Should auto-detect protocol via virtual serial port")
-        void shouldAutoDetectProtocol() throws Exception {
-            assumeTrue(testPort != null, "SERIAL_TEST_PORT not set");
-            assumeTrue(testPortPair != null, "SERIAL_TEST_PORT_PAIR not set");
-
-            SerialConfigurationProperties config = new SerialConfigurationProperties();
-            config.setEnabled(true);
-
-            SerialPortConfig portConfig = new SerialPortConfig();
-            portConfig.setPath(testPort);
-            portConfig.setBaudRate(9600);
-            portConfig.setProtocol(ProtocolMode.AUTO);
-
-            config.setPorts(List.of(portConfig));
-
-            HTTPForwardServerConfigurationProperties httpConfig = new HTTPForwardServerConfigurationProperties();
-            httpConfig.setUri(java.net.URI.create("http://localhost:" + serverPort + "/api/OpenELIS-Global/analyzer"));
-
-            HttpForwardingRouter forwardingRouter = new HttpForwardingRouter(httpConfig, null, null, null);
-            AnalyzerIdentifier identifier = new AnalyzerIdentifier(null);
-            MessageNormalizer normalizer = new MessageNormalizer(forwardingRouter, identifier, null);
-            SerialMessageHandler handler = new SerialMessageHandler(normalizer);
-
-            listener = new SerialPortListener(config, handler);
-            listener.start();
-
-            Thread.sleep(1000);
-
-            // Send ASTM message - should auto-detect
-            sendASTMMessage(testPortPair);
-
-            boolean received = messageLatch.await(10, TimeUnit.SECONDS);
-            assertTrue(received);
-
-            ReceivedMessage msg = receivedMessages.get(0);
-            assertEquals("/api/OpenELIS-Global/analyzer/astm", msg.path);
+        private SerialMessageHandler normalizedHandler(
+                HTTPForwardServerConfigurationProperties httpConfig, String protocol) {
+            AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
+            AnalyzerRuntimeRegistry.AnalyzerEntry entry = new AnalyzerRuntimeRegistry.AnalyzerEntry();
+            entry.setId("TEST-ANALYZER");
+            entry.setBridgeConnectionId("bridge-serial-it");
+            entry.setProfileId("site.serial-it");
+            entry.setProfileRevision(1);
+            entry.setExpectedProtocol(protocol);
+            entry.setControlResultRecognition(ControlResultRecognition.none());
+            entry.setRecognitionFingerprint("sha256:" + "0".repeat(64));
+            if ("ASTM".equals(protocol)) {
+                entry.setAstmResultRecordSelection(AstmResultRecordSelection.all());
+            }
+            registry.register("connection:serial-it", entry);
+            HttpForwardingRouter forwardingRouter = new HttpForwardingRouter(httpConfig, null, registry);
+            MessageNormalizer normalizer = new MessageNormalizer(
+                    forwardingRouter, new AnalyzerIdentifier(registry), null);
+            return new SerialMessageHandler(normalizer);
         }
 
         /**
@@ -293,7 +253,8 @@ class SerialIntegrationTest {
                 Thread.sleep(100);
 
                 // Send frame: <STX><FN><data><ETX><checksum><CR><LF>
-                String text = "H|\\^&|||TEST|||||||P|1";
+                String text = "H|\\^&|||TEST|||||||P|1\rP|1||PATIENT-1\r"
+                        + "O|1|12345\rR|1|^^^WBC|7.5|10*3/uL\rL|1|N";
                 byte[] frame = buildASTMFrame(1, text, true);
                 port.writeBytes(frame, frame.length);
                 Thread.sleep(100);
@@ -362,70 +323,21 @@ class SerialIntegrationTest {
         }
     }
 
-    /**
-     * Tests for port listing and status (no actual serial ports required).
-     */
-    @Nested
-    @DisplayName("Port Status Tests")
-    class PortStatusTests {
-
-        @Test
-        @DisplayName("Should report correct status for non-existent port")
-        void shouldReportStatusForNonExistentPort() {
-            SerialConfigurationProperties config = new SerialConfigurationProperties();
-            config.setEnabled(true);
-
-            SerialPortConfig portConfig = new SerialPortConfig();
-            portConfig.setPath("/dev/nonexistent_port_xyz123");
-            portConfig.setBaudRate(9600);
-
-            // Use setPorts instead of getPorts().add() due to defensive copy
-            List<SerialPortConfig> ports = new ArrayList<>();
-            ports.add(portConfig);
-            config.setPorts(ports);
-
-            HTTPForwardServerConfigurationProperties httpConfig = new HTTPForwardServerConfigurationProperties();
-            httpConfig.setUri(java.net.URI.create("http://localhost:" + serverPort + "/api/OpenELIS-Global/analyzer"));
-
-            HttpForwardingRouter forwardingRouter = new HttpForwardingRouter(httpConfig, null, null, null);
-            AnalyzerIdentifier identifier = new AnalyzerIdentifier(null);
-            MessageNormalizer normalizer = new MessageNormalizer(forwardingRouter, identifier, null);
-            SerialMessageHandler handler = new SerialMessageHandler(normalizer);
-
-            SerialPortListener listener = new SerialPortListener(config, handler);
-
-            // Start should not throw
-            assertDoesNotThrow(listener::start);
-
-            // Should be pending reconnection (port doesn't exist)
-            SerialPortListener.PortStatus status = listener.getPortStatus("/dev/nonexistent_port_xyz123");
-            assertFalse(status.isOpen());
-            assertTrue(status.isPendingReconnect() || status.reconnectAttempts() > 0);
-
-            listener.stop();
-        }
-
-        @Test
-        @DisplayName("Should list no open ports when none configured")
-        void shouldListNoOpenPortsWhenNoneConfigured() {
-            SerialConfigurationProperties config = new SerialConfigurationProperties();
-            config.setEnabled(true);
-
-            HTTPForwardServerConfigurationProperties httpConfig = new HTTPForwardServerConfigurationProperties();
-            httpConfig.setUri(java.net.URI.create("http://localhost:" + serverPort + "/api/OpenELIS-Global/analyzer"));
-
-            HttpForwardingRouter forwardingRouter = new HttpForwardingRouter(httpConfig, null, null, null);
-            AnalyzerIdentifier identifier = new AnalyzerIdentifier(null);
-            MessageNormalizer normalizer = new MessageNormalizer(forwardingRouter, identifier, null);
-            SerialMessageHandler handler = new SerialMessageHandler(normalizer);
-
-            SerialPortListener listener = new SerialPortListener(config, handler);
-            listener.start();
-
-            assertTrue(listener.getOpenPorts().isEmpty());
-
-            listener.stop();
-        }
+    private static SerialConnectionSettings serialSettings(String protocol) {
+        return new SerialConnectionSettings(
+            protocol,
+            9600,
+            8,
+            1,
+            "NONE",
+            "NONE",
+            1000,
+            30000,
+            5000,
+            -1,
+            true,
+            true
+        );
     }
 
     /**
@@ -435,7 +347,6 @@ class SerialIntegrationTest {
         String path,
         String body,
         String contentType,
-        String sourceId,
-        String transport
+        boolean hasSourceHeaders
     ) {}
 }

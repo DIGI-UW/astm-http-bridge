@@ -2,16 +2,14 @@ package org.itech.ahb.normalizer;
 
 import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.regex.Pattern;
-import org.itech.ahb.config.AnalyzerRegistryConfig;
+import org.itech.ahb.connection.AnalyzerRuntimeRegistry;
 import org.itech.ahb.metrics.MetricsService;
 import org.itech.ahb.model.Protocol;
+import org.itech.ahb.model.Transport;
 import org.itech.ahb.routing.HttpForwardingRouter;
 import org.itech.ahb.routing.MessageRouter;
 import org.itech.ahb.util.DeadLetterWriter;
-import org.itech.ahb.util.OeApiClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
@@ -50,11 +48,9 @@ public class MessageNormalizer implements MessageRouter {
 
     private final HttpForwardingRouter forwardingRouter;  // Inject by CONCRETE TYPE
     private final AnalyzerIdentifier identifier;
-    private final AnalyzerRegistryConfig registry;  // optional — for diagnostic validation only
+    private final AnalyzerRuntimeRegistry registry;
     private final MetricsService metricsService;  // nullable — optional dependency
-    private final OeApiClient oeApiClient;  // nullable — for discovered-source reporting
-    private final DeadLetterWriter deadLetterWriter;  // nullable — for DLQ on unknown sources
-    private final java.util.concurrent.Executor asyncExecutor;
+    private final DeadLetterWriter deadLetterWriter;
 
     /**
      * Minimal constructor for tests and non-discovery use cases.
@@ -63,37 +59,21 @@ public class MessageNormalizer implements MessageRouter {
             HttpForwardingRouter forwardingRouter,
             AnalyzerIdentifier identifier,
             MetricsService metricsService) {
-        this(forwardingRouter, identifier, null, metricsService, null, null);
+        this(forwardingRouter, identifier, null, metricsService, null);
     }
 
     @Autowired
     public MessageNormalizer(
             HttpForwardingRouter forwardingRouter,
             AnalyzerIdentifier identifier,
-            @Autowired(required = false) AnalyzerRegistryConfig registry,
+            @Autowired(required = false) AnalyzerRuntimeRegistry registry,
             @Autowired(required = false) MetricsService metricsService,
-            @Autowired(required = false) OeApiClient oeApiClient,
             @Autowired(required = false) DeadLetterWriter deadLetterWriter) {
-        this(forwardingRouter, identifier, registry, metricsService, oeApiClient, deadLetterWriter,
-                java.util.concurrent.ForkJoinPool.commonPool());
-    }
-
-    /** Test constructor — accepts a custom executor for deterministic async verification. */
-    public MessageNormalizer(
-            HttpForwardingRouter forwardingRouter,
-            AnalyzerIdentifier identifier,
-            AnalyzerRegistryConfig registry,
-            MetricsService metricsService,
-            OeApiClient oeApiClient,
-            DeadLetterWriter deadLetterWriter,
-            java.util.concurrent.Executor asyncExecutor) {
         this.forwardingRouter = forwardingRouter;
         this.identifier = identifier;
         this.registry = registry;
         this.metricsService = metricsService;
-        this.oeApiClient = oeApiClient;
         this.deadLetterWriter = deadLetterWriter;
-        this.asyncExecutor = asyncExecutor;
     }
 
     /**
@@ -139,7 +119,7 @@ public class MessageNormalizer implements MessageRouter {
         if (envelope.getProtocol() == null || envelope.getTransport() == null) {
             log.error("MessageEnvelope missing protocol or transport: protocol={}, transport={}, sourceId={}, analyzerId={}",
                 envelope.getProtocol(), envelope.getTransport(),
-                envelope.getSourceId(), envelope.getAnalyzerId());
+                envelope.getSourceId(), envelope.getResolvedAnalyzerId());
             return false;
         }
         if (envelope.getSourceId() == null || envelope.getSourceId().trim().isEmpty()) {
@@ -162,7 +142,22 @@ public class MessageNormalizer implements MessageRouter {
             metricsService.recordReceived(protocol, transport);
         }
 
-        String protocolHint = firstNonBlank(envelope.getProtocolAnalyzerHint(), envelope.getAnalyzerId());
+        String protocolHint = envelope.getProtocolAnalyzerHint();
+
+        AnalyzerRuntimeRegistry.AnalyzerEntry registryEntry = registry != null
+          ? registry.findAnalyzerEntry(envelope.getSourceId()).orElse(null)
+          : null;
+        if (registry != null && !matchesSavedTransport(envelope, registryEntry)) {
+          recordIdentity(protocol, transport, registryEntry == null ? "unregistered_source" : "transport_mismatch");
+          log.warn(
+            "Rejecting protocol/transport inconsistent with saved connection for source '{}'",
+            envelope.getSourceId()
+          );
+          if (deadLetterWriter != null) deadLetterWriter.write(envelope,
+              registryEntry == null ? "UNREGISTERED_SOURCE" : "CONNECTION_TRANSPORT_MISMATCH");
+          if (metricsService != null) metricsService.recordRouted(sample, protocol, transport, false);
+          return false;
+        }
 
         // Skip ASTM Q-only messages (queries with no R-records) — they don't carry
         // results to forward. Until bidirectional order-response is implemented
@@ -180,35 +175,25 @@ public class MessageNormalizer implements MessageRouter {
 
         String resolvedAnalyzerId = identifier.identify(envelope);
 
-        // Transparent-pipe principle: routing is NEVER gated on local source
-        // registration. If we don't recognize the source, we forward the
-        // bundle anyway with full identification (sourceId + protocolHint
-        // travel as Device resource fields) and let OE handle find-or-create
-        // stub atomically per FHIR-bundle import. See
-        // .claude/projects/.../memory/feedback_bridge_transparent_fhir_pipe.md
-        // for the architectural rule.
         if (resolvedAnalyzerId == null || resolvedAnalyzerId.isBlank()) {
-            log.info("Source '{}' not in local registry — forwarding bundle anyway. "
-                + "OE will find-or-create stub from Device resource. protocolHint='{}'",
+            recordIdentity(protocol, transport, "unregistered_source");
+            log.warn("Rejecting unregistered analyzer source '{}'; protocolHint='{}' is evidence only",
                 envelope.getSourceId(), protocolHint);
+            if (deadLetterWriter != null) {
+                deadLetterWriter.write(envelope, "UNREGISTERED_SOURCE");
+            }
+            if (metricsService != null) {
+                metricsService.recordRouted(sample, protocol, transport, false);
+            }
+            return false;
         }
 
-        AnalyzerRegistryConfig.AnalyzerEntry registryEntry = registry != null
-            ? registry.findAnalyzerEntry(envelope.getSourceId()).orElse(null)
-            : null;
-
-        // Corroborate the two analyzer-identity signals: the connection source IP
-        // (resolvedAnalyzerId) and the in-message sender (protocolHint). Identity
-        // NEVER gates routing — the transparent-pipe rule above stands — this only
-        // surfaces a warning + metric so a silent content-only fallback can't hide
-        // delivery bugs the way it hid the analyzer-demo flake. Routing remains
-        // bound to the IP-resolved analyzer when present; otherwise OE resolves
-        // from the FHIR Device resource carrying the same hint.
-        boolean haveIp = resolvedAnalyzerId != null && !resolvedAnalyzerId.isBlank();
+        // The source-bound saved connection is routing authority. A protocol hint
+        // can corroborate or contradict it, but never replace it.
         boolean haveHint = protocolHint != null && !protocolHint.isBlank();
-        if (haveIp && haveHint) {
-            boolean agrees = protocolHint.equals(resolvedAnalyzerId)
-                || (registryEntry != null && protocolHintMatchesRegistration(protocolHint, registryEntry));
+        if (haveHint) {
+            boolean agrees = registryEntry != null
+                && protocolHintMatchesRegistration(protocolHint, registryEntry);
             if (agrees) {
                 recordIdentity(protocol, transport, "corroborated");
                 log.info("Analyzer identity corroborated for source '{}': resolved='{}', protocolHint='{}', registeredName='{}'",
@@ -220,10 +205,6 @@ public class MessageNormalizer implements MessageRouter {
                     envelope.getSourceId(), resolvedAnalyzerId, protocolHint,
                     registryEntry != null ? registryEntry.getName() : "unknown");
             }
-        } else if (!haveIp && haveHint) {
-            recordIdentity(protocol, transport, "degraded_content_only");
-            log.warn("Analyzer identity degraded for source '{}': connection source IP did not resolve to a registered analyzer; routing on the in-message sender alone (protocolHint='{}')",
-                envelope.getSourceId(), protocolHint);
         }
 
         // Rebuild envelope with explicit canonical ID and protocol hint.
@@ -236,7 +217,6 @@ public class MessageNormalizer implements MessageRouter {
             .receivedAt(envelope.getReceivedAt())
             .protocolAnalyzerHint(protocolHint)
             .resolvedAnalyzerId(resolvedAnalyzerId)
-            .analyzerId(resolvedAnalyzerId)
             .build();
 
         // 3. Audit log
@@ -258,6 +238,20 @@ public class MessageNormalizer implements MessageRouter {
         }
 
         return success;
+    }
+
+    private boolean matchesSavedTransport(MessageEnvelope envelope, AnalyzerRuntimeRegistry.AnalyzerEntry entry) {
+      if (entry == null) return false;
+      String savedProtocol = entry.getExpectedProtocol();
+      String actualProtocol = envelope.getProtocol() == Protocol.CSV ? "FILE" : envelope.getProtocol().name();
+      if (!actualProtocol.equals(savedProtocol)) return false;
+      Transport actualTransport = envelope.getTransport();
+      String savedTransport = entry.getInboundTransport();
+      if ("TCP/IP".equals(savedTransport)) {
+        return "HL7".equals(savedProtocol) ? actualTransport == Transport.MLLP : actualTransport == Transport.TCP;
+      }
+      if ("RS-232".equals(savedTransport)) return actualTransport == Transport.SERIAL;
+      return actualTransport.name().equals(savedTransport);
     }
 
     /**
@@ -296,53 +290,16 @@ public class MessageNormalizer implements MessageRouter {
         }
     }
 
-    private String firstNonBlank(String first, String second) {
-        if (first != null && !first.isBlank()) {
-            return first;
-        }
-        if (second != null && !second.isBlank()) {
-            return second;
-        }
-        return null;
-    }
-
     private boolean protocolHintMatchesRegistration(
             String protocolHint,
-            AnalyzerRegistryConfig.AnalyzerEntry registryEntry) {
+            AnalyzerRuntimeRegistry.AnalyzerEntry registryEntry) {
         if (protocolHint == null || protocolHint.isBlank() || registryEntry == null) {
             return false;
         }
 
-        // Primary: corroborate against the SAME regex OE uses to identify the
-        // sender (Analyzer.identifierPattern). This is authoritative and keeps the
-        // two identity signals consistent — it matches ASTM caret-delimited
-        // senders ("GENEXPERT^GeneXpert^4.6.0") and HL7 MSH-3/4 hints alike,
-        // without the false-positive risk of a manufacturer-substring heuristic.
-        // The pattern is compiled once at registration/sync time and cached on the
-        // entry (CASE_INSENSITIVE); invalid patterns are rejected/ignored there and
-        // never reach here, so this is a pure matcher().find() per message.
+        // The pinned profile's identifier pattern is the only content signal that
+        // can corroborate the source-bound connection.
         Pattern idPattern = registryEntry.getCompiledIdentifierPattern();
-        if (idPattern != null && idPattern.matcher(protocolHint).find()) {
-            return true;
-        }
-
-        // Fallback for analyzers registered without a pattern: normalized name/id.
-        String normalizedHint = normalizeIdentityToken(protocolHint);
-        String normalizedName = normalizeIdentityToken(registryEntry.getName());
-        String normalizedId = normalizeIdentityToken(registryEntry.getId());
-
-        if (normalizedHint.isEmpty()) {
-            return false;
-        }
-
-        return (!normalizedName.isEmpty() && normalizedName.contains(normalizedHint))
-            || (!normalizedId.isEmpty() && normalizedId.equals(normalizedHint));
-    }
-
-    private String normalizeIdentityToken(String value) {
-        if (value == null) {
-            return "";
-        }
-        return value.replaceAll("[^A-Za-z0-9]", "").toUpperCase();
+        return idPattern != null && idPattern.matcher(protocolHint).find();
     }
 }

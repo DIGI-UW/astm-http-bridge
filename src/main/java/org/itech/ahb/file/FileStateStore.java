@@ -63,6 +63,7 @@ public interface FileStateStore {
      * Persist the next-attempt timestamp so a JVM restart honors the
      * current backoff schedule. The rescan loop must compare this to
      * {@link Instant#now()} and skip files whose backoff has not elapsed.
+     * A null timestamp clears the delay, making a RETRYING row eligible again.
      */
     void setNextAttemptAt(String analyzerId, String contentHash, Instant at);
 

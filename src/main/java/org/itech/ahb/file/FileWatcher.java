@@ -56,10 +56,9 @@ public class FileWatcher {
     /**
      * Registrations for each watched directory. A single directory may host
      * multiple analyzer registrations, each with its own glob pattern and its
-     * own {@link FileAlterationObserver}. This is the refactor that unblocks
-     * Madagascar's Fluorocycler XT workflow where one physical folder hosts
-     * both HIV VL ({@code HIV*.xlsx}) and Arbovirus ({@code ARBO*.xlsx}) runs
-     * under different analyzer instances. Apache Commons IO's
+     * own {@link FileAlterationObserver}. This supports multiple analyzer
+     * instances sharing one physical folder while using distinct profile-owned
+     * file patterns. Apache Commons IO's
      * {@link FileAlterationMonitor} supports multiple observers per directory
      * natively (internal {@code CopyOnWriteArrayList}); the prior single-
      * entry-per-path maps were an artificial constraint.
@@ -88,14 +87,109 @@ public class FileWatcher {
      * state store's RETRYING/next_attempt_at fields carry the scheduling forward.
      */
     private final Set<Path> processingFiles = ConcurrentHashMap.newKeySet();
+    private final Object processingMonitor = new Object();
+    private final Map<Path, Integer> pausedDirectories = new HashMap<>();
+    private final Object shutdownMonitor = new Object();
+    private volatile boolean stopping;
+    private boolean shutdownComplete;
+
+    /**
+     * Claim a physical file for the entire write/process/state-update operation.
+     * Uploads and watcher workers share this gate; a retry timestamp is not a lock.
+     * Returns null when busy, paused, stopping, or no matching registration remains active.
+     */
+    public FileProcessingLease tryClaimFile(Path filePath, String expectedAnalyzerId) throws IOException {
+        Path canonicalPath = filePath.toFile().getCanonicalFile().toPath();
+        synchronized (processingMonitor) {
+            if (stopping || pausedDirectories.keySet().stream().anyMatch(canonicalPath::startsWith)) {
+                return null;
+            }
+            String owner = determineAnalyzerId(filePath);
+            if (owner == null || (expectedAnalyzerId != null && !expectedAnalyzerId.equals(owner))) {
+                return null;
+            }
+            return processingFiles.add(canonicalPath) ? new FileProcessingLease(canonicalPath) : null;
+        }
+    }
+
+    /**
+     * Prevent new work and drain existing claims before connection removal or
+     * directory cleanup. Never call while holding the runtime registry lock:
+     * processors may need that registry to complete. A timeout leaves cleanup
+     * unperformed; no worker is assumed cancelled merely because a wait expired.
+     */
+    public DirectoryPause pauseDirectory(Path directory) throws IOException {
+        Path canonicalPath = directory.toFile().getCanonicalFile().toPath();
+        synchronized (processingMonitor) {
+            pausedDirectories.merge(canonicalPath, 1, Integer::sum);
+            DirectoryPause pause = new DirectoryPause(canonicalPath);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            try {
+                while (processingFiles.stream().anyMatch(path -> path.startsWith(canonicalPath))) {
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0) {
+                        throw new IOException("Timed out draining FILE work for " + directory);
+                    }
+                    TimeUnit.NANOSECONDS.timedWait(processingMonitor, remaining);
+                }
+                return pause;
+            } catch (InterruptedException exception) {
+                pause.close();
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted draining FILE work for " + directory, exception);
+            } catch (IOException | RuntimeException exception) {
+                pause.close();
+                throw exception;
+            }
+        }
+    }
+
+    public final class DirectoryPause implements AutoCloseable {
+        private final Path directory;
+        private boolean closed;
+
+        private DirectoryPause(Path directory) {
+            this.directory = directory;
+        }
+
+        @Override
+        public void close() {
+            synchronized (processingMonitor) {
+                if (!closed) {
+                    pausedDirectories.compute(directory, (path, count) -> count == 1 ? null : count - 1);
+                    closed = true;
+                }
+            }
+        }
+    }
+
+    public final class FileProcessingLease implements AutoCloseable {
+        private final Path path;
+        private boolean closed;
+
+        private FileProcessingLease(Path path) {
+            this.path = path;
+        }
+
+        @Override
+        public void close() {
+            synchronized (processingMonitor) {
+                if (!closed) {
+                    processingFiles.remove(path);
+                    closed = true;
+                    processingMonitor.notifyAll();
+                }
+            }
+        }
+    }
 
     private FileAlterationMonitor monitor;
     private ExecutorService processorExecutor;
-    private final ScheduledExecutorService stabilityChecker = Executors.newScheduledThreadPool(1);
+    private final ScheduledThreadPoolExecutor stabilityChecker = new ScheduledThreadPoolExecutor(1);
     /**
      * Durable per-file processing state. Replaces the former in-memory
      * {@code processedFileHashes} / {@code retryTracker} / {@code permanentlySkippedFiles}
-     * sets. Initialized in {@link #start()}; closed in {@link #stop()}.
+     * sets. Injected as a shared bean; Spring owns its closure after dependent services stop.
      */
     private FileStateStore stateStore;
 
@@ -114,6 +208,9 @@ public class FileWatcher {
         // start() bails out on !fileConfig.isEnabled() before touching the
         // store, so null here is safe.
         this.stateStore = stateStore;
+        // Retry deadlines are persisted. Queued retries must not delay shutdown;
+        // already-running work still holds its lease until its state is recorded.
+        stabilityChecker.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
     /**
@@ -121,6 +218,9 @@ public class FileWatcher {
      */
     @PostConstruct
     public synchronized void start() throws IOException {
+        if (stopping) {
+            throw new IOException("Cannot restart a stopped FILE watcher; restore connections in a new service instance");
+        }
         if (running) {
             return;
         }
@@ -135,14 +235,6 @@ public class FileWatcher {
         // Initialize polling monitor and processor
         monitor = new FileAlterationMonitor(fileConfig.getPollIntervalMs());
         processorExecutor = Executors.newFixedThreadPool(2);
-
-        // Register bootstrap directories (if any)
-        for (String watchDir : fileConfig.getWatchDirectories()) {
-            if (watchDir == null || watchDir.isBlank()) {
-                continue;
-            }
-            registerDirectoryInternal(Paths.get(watchDir).normalize(), null, true);
-        }
 
         running = true;
         try {
@@ -182,14 +274,12 @@ public class FileWatcher {
      * in which case it is replaced in-place (glob + observer refreshed).
      */
     public synchronized void addWatchDirectory(Path dirPath, String filePattern, String analyzerId) throws IOException {
+        if (stopping) {
+            throw new IOException("Cannot activate a FILE watch while the service is stopping");
+        }
         Path normalized = dirPath.normalize();
         String effectiveGlob = (filePattern == null || filePattern.isBlank()) ? "*" : filePattern;
         registerDirectoryInternal(normalized, analyzerId, effectiveGlob, true);
-        if (!fileConfig.getWatchDirectories().contains(normalized.toString())) {
-            List<String> mutableWatchDirs = new ArrayList<>(fileConfig.getWatchDirectories());
-            mutableWatchDirs.add(normalized.toString());
-            fileConfig.setWatchDirectories(mutableWatchDirs);
-        }
         log.info("Runtime watch directory registered: {} (analyzerId={}, glob={})", normalized, analyzerId,
                 effectiveGlob);
     }
@@ -201,6 +291,14 @@ public class FileWatcher {
      * others alive, use {@link #removeWatchRegistration(Path, String)}.
      */
     public synchronized boolean removeWatchDirectory(Path dirPath) {
+        try (DirectoryPause pause = pauseDirectory(dirPath)) {
+            return removeWatchDirectoryDrained(dirPath);
+        } catch (IOException exception) {
+            throw new IllegalStateException("Cannot drain FILE directory for removal", exception);
+        }
+    }
+
+    private boolean removeWatchDirectoryDrained(Path dirPath) {
         Path normalized = dirPath.normalize();
         List<WatchRegistration> registrations = registrationsByDirectory.remove(normalized);
         if (registrations == null || registrations.isEmpty()) {
@@ -214,9 +312,6 @@ public class FileWatcher {
             }
         }
         pendingDirectories.remove(normalized);
-        List<String> mutableWatchDirs = new ArrayList<>(fileConfig.getWatchDirectories());
-        mutableWatchDirs.remove(normalized.toString());
-        fileConfig.setWatchDirectories(mutableWatchDirs);
         log.info("Runtime watch directory removed: {} ({} registration(s))", normalized, registrations.size());
         return true;
     }
@@ -232,6 +327,14 @@ public class FileWatcher {
      * whole directory).
      */
     public synchronized boolean removeWatchRegistration(Path dirPath, String analyzerId) {
+        try (DirectoryPause pause = pauseDirectory(dirPath)) {
+            return removeWatchRegistrationDrained(dirPath, analyzerId);
+        } catch (IOException exception) {
+            throw new IllegalStateException("Cannot drain FILE registration for removal", exception);
+        }
+    }
+
+    private boolean removeWatchRegistrationDrained(Path dirPath, String analyzerId) {
         Path normalized = dirPath.normalize();
         List<WatchRegistration> registrations = registrationsByDirectory.get(normalized);
         if (registrations == null || registrations.isEmpty()) {
@@ -254,9 +357,6 @@ public class FileWatcher {
         if (registrations.isEmpty()) {
             registrationsByDirectory.remove(normalized);
             pendingDirectories.remove(normalized);
-            List<String> mutableWatchDirs = new ArrayList<>(fileConfig.getWatchDirectories());
-            mutableWatchDirs.remove(normalized.toString());
-            fileConfig.setWatchDirectories(mutableWatchDirs);
         }
         log.info("Removed watch registration for analyzer {} at {}", analyzerId, normalized);
         return true;
@@ -274,19 +374,6 @@ public class FileWatcher {
             }
         }
         return removed;
-    }
-
-    /**
-     * Bootstrap overload used by {@link #start()} when registering directories
-     * from {@link FileConfig#getWatchDirectories()}. Bootstrap registrations
-     * do not carry a per-analyzer glob — the directory is watched with a
-     * catch-all glob and filtering falls back to the legacy
-     * {@link FileConfig#getFilePatterns()} list evaluated in
-     * {@link #shouldProcessFile}.
-     */
-    private void registerDirectoryInternal(Path dirPath, String analyzerId, boolean processExisting)
-            throws IOException {
-        registerDirectoryInternal(dirPath, analyzerId, "*", processExisting);
     }
 
     /**
@@ -408,18 +495,11 @@ public class FileWatcher {
     }
 
     /**
-     * Base-level file filter applied by every observer: skips hidden files
-     * and legacy {@code .error} / {@code .failed} sidecars. The non-
-     * destructive bridge never writes these, but a previous bridge version
-     * may have left them behind. Per-registration glob matching runs AFTER
-     * this base filter.
+     * Base-level file filter applied before a profile-owned glob.
      */
     private boolean matchesBaseFilter(Path filePath) {
         String filename = filePath.getFileName().toString();
-        if (filename.startsWith(".") || filename.endsWith(".error") || filename.endsWith(".failed")) {
-            return false;
-        }
-        return true;
+        return !filename.startsWith(".");
     }
 
     /**
@@ -450,28 +530,54 @@ public class FileWatcher {
      */
     @PreDestroy
     public void stop() {
-        log.info("Stopping file watcher service...");
-        running = false;
+        synchronized (shutdownMonitor) {
+            if (shutdownComplete) return;
+            log.info("Stopping file watcher service...");
+            // Coordinate startup/registration, but never hold the outer lock
+            // while waiting for monitor callbacks, processors, or uploads.
+            synchronized (this) {
+                synchronized (processingMonitor) {
+                    stopping = true;
+                    running = false;
+                }
+            }
 
-        // Stop polling monitor
-        if (monitor != null) {
-            try {
-                monitor.stop();
-            } catch (Exception e) {
-                log.error("Error stopping file alteration monitor", e);
+            if (monitor != null) {
+                try {
+                    monitor.stop();
+                } catch (Exception e) {
+                    log.error("Error stopping file alteration monitor", e);
+                }
+            }
+
+            // Stop producers before their processing executor. Queued retries
+            // are durable and will be rediscovered after process restart.
+            shutdownExecutor(stabilityChecker, "stability-checker");
+            shutdownExecutor(processorExecutor, "processor");
+            awaitUploadAndWorkerClaims();
+
+            // The state store is shared; its bean owner closes it, not this service.
+            shutdownComplete = true;
+            log.info("File watcher service stopped");
+        }
+    }
+
+    private void awaitUploadAndWorkerClaims() {
+        synchronized (processingMonitor) {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (!processingFiles.isEmpty()) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    throw new IllegalStateException("FILE shutdown incomplete: timed out draining active work");
+                }
+                try {
+                    TimeUnit.NANOSECONDS.timedWait(processingMonitor, remaining);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("FILE shutdown incomplete: interrupted draining active work", exception);
+                }
             }
         }
-
-        // Shutdown executors gracefully
-        shutdownExecutor(processorExecutor, "processor");
-        shutdownExecutor(stabilityChecker, "stability-checker");
-
-        // State store is a shared @Bean; Spring closes it via
-        // StateStoreConfig#fileStateStore(destroyMethod="close") during
-        // ApplicationContext shutdown. FileWatcher must NOT close it here
-        // because HttpForwardingRouter may still be using it.
-
-        log.info("File watcher service stopped");
     }
 
     /**
@@ -654,18 +760,15 @@ public class FileWatcher {
      * </ol>
      */
     private void processFileWithRetry(Path filePath) {
-        // In-process lock: prevent two threads in this JVM from processing
-        // the same path concurrently. Persistent retry scheduling is handled
-        // by the state store's next_attempt_at; this set is purely for
-        // intra-JVM races (e.g. rescan vs. scheduled retry firing near-simultaneously).
-        if (!processingFiles.add(filePath)) {
-            log.debug("File already being processed by another thread: {}", filePath.getFileName());
-            return;
-        }
-
         String analyzerId = null;
         String fileHash = null;
+        FileProcessingLease claim = null;
         try {
+            claim = tryClaimFile(filePath, null);
+            if (claim == null) {
+                log.debug("No available active FILE claim for: {}", filePath.getFileName());
+                return;
+            }
             analyzerId = determineAnalyzerId(filePath);
             if (analyzerId == null) {
                 log.warn("Could not determine analyzer for file {}; skipping", filePath);
@@ -721,7 +824,9 @@ public class FileWatcher {
                         filePath, e.getMessage(), e);
             }
         } finally {
-            processingFiles.remove(filePath);
+            if (claim != null) {
+                claim.close();
+            }
             MDC.remove("analyzerId");
             MDC.remove("contentHash");
             MDC.remove("path");
@@ -755,9 +860,13 @@ public class FileWatcher {
         long delay = fileConfig.getRetryDelayMs() * (long) Math.pow(2, attempts - 1);
         Instant nextAt = Instant.now().plusMillis(delay);
         stateStore.setNextAttemptAt(analyzerId, fileHash, nextAt);
-        log.info("Scheduling retry for file: {} in {}ms (next_attempt_at={})",
+        log.info("Recorded retry deadline for file: {} in {}ms (next_attempt_at={})",
                 filePath.getFileName(), delay, nextAt);
-        stabilityChecker.schedule(() -> processFileWithRetry(filePath), delay, TimeUnit.MILLISECONDS);
+        synchronized (processingMonitor) {
+            if (!stopping) {
+                stabilityChecker.schedule(() -> processFileWithRetry(filePath), delay, TimeUnit.MILLISECONDS);
+            }
+        }
     }
 
     /**
@@ -801,24 +910,13 @@ public class FileWatcher {
     /**
      * Determine the analyzer ID that owns a given file path.
      * <p>
-     * Lookup order (first match wins):
-     * <ol>
-     *   <li>Per-directory registrations: iterate the parent directory's
-     *       {@link WatchRegistration} list and return the first one whose
-     *       glob pattern matches the file name. This is how multi-observer
-     *       directories route: each analyzer declared its own glob at
-     *       registration time, and only one should match any given file.</li>
-     *   <li>Legacy {@code fileConfig.getAnalyzers()} pattern map — kept as a
-     *       fallback for bootstrap-registered analyzers that came in through
-     *       the config file rather than runtime registration.</li>
-     *   <li>Directory name as last resort.</li>
-     * </ol>
+     * A file has an owner only when an active saved connection registered a
+     * matching profile glob for its parent directory.
      *
      * @param filePath the file path to analyze
      * @return analyzer ID or null if cannot be determined
      */
     private String determineAnalyzerId(Path filePath) {
-        String pathString = filePath.toString();
         String filename = filePath.getFileName().toString();
 
         Path parent = filePath.getParent();
@@ -844,53 +942,14 @@ public class FileWatcher {
             }
         }
 
-        // Check configured analyzer patterns (legacy fallback for bootstrap
-        // registrations via FileConfig rather than runtime addWatchDirectory).
-        for (Map.Entry<String, FileConfig.AnalyzerConfig> entry : fileConfig.getAnalyzers().entrySet()) {
-            String pattern = entry.getKey();
-            FileConfig.AnalyzerConfig config = entry.getValue();
-
-            // Use filePattern if specified, otherwise use key as pattern
-            String matchPattern = config.getFilePattern() != null ? config.getFilePattern() : pattern;
-
-            // Glob pattern matching (e.g., "quantstudio-*")
-            if (matchPattern.contains("*") || matchPattern.contains("?")) {
-                try {
-                    PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + matchPattern);
-                    if (matcher.matches(filePath.getFileName())) {
-                        log.debug("Matched file {} to analyzer {} via glob pattern: {}",
-                                filename, config.getId(), matchPattern);
-                        return config.getId();
-                    }
-                } catch (Exception e) {
-                    log.warn("Invalid glob pattern: {}", matchPattern, e);
-                }
-            }
-            // Substring matching (e.g., "quantstudio")
-            else if (pathString.contains(matchPattern) || filename.contains(matchPattern)) {
-                log.debug("Matched file {} to analyzer {} via substring: {}",
-                        filename, config.getId(), matchPattern);
-                return config.getId();
-            }
-        }
-
-        // Fallback: use parent directory name
-        if (parent != null) {
-            String dirName = parent.getFileName().toString().toUpperCase();
-            log.debug("No pattern match for file {}, using directory name: {}", filename, dirName);
-            return dirName;
-        }
-
-        log.debug("Could not determine analyzer ID for file: {}", filePath);
+        log.debug("No active saved connection owns file {}", filePath);
         return null;
     }
 
     /**
      * Check if a file should be processed by ANY registered analyzer.
      * <p>
-     * Skips hidden files and any legacy {@code .error} / {@code .failed}
-     * sidecars that a previous (destructive) bridge version may have left
-     * in the watched directory. Then checks each registration at the parent
+     * Skips hidden files, then checks each registration at the parent
      * directory — returns true if ANY registration's glob matches. This is
      * used by the rescan safety net and by existing-file bootstrap walks;
      * the per-observer IOFileFilter captured at registration time is what
@@ -924,16 +983,6 @@ public class FileWatcher {
                 // A directory with registrations is opinionated: if no glob
                 // matched, the file belongs to no analyzer at this path.
                 return false;
-            }
-        }
-
-        // No per-directory registrations — fall back to the bootstrap
-        // fileConfig.getFilePatterns() list (e.g. *.csv, *.hl7) for legacy
-        // config-file-driven analyzers.
-        for (String pattern : fileConfig.getFilePatterns()) {
-            PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
-            if (matcher.matches(filePath.getFileName())) {
-                return true;
             }
         }
 

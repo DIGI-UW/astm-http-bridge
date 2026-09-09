@@ -13,7 +13,12 @@ import org.hl7.fhir.r4.model.Quantity;
 import org.hl7.fhir.r4.model.Reference;
 import org.hl7.fhir.r4.model.Specimen;
 import org.hl7.fhir.r4.model.StringType;
+import org.itech.ahb.fhir.FhirBundleBuilder.AnalyzerContext;
 import org.itech.ahb.fhir.FhirBundleBuilder.AnalyzerResult;
+import org.itech.ahb.fhir.FhirBundleBuilder.DeviceInfo;
+import org.itech.ahb.profile.ControlRecognitionRule;
+import org.itech.ahb.profile.ControlResultRecognition;
+import org.itech.ahb.profile.ControlResultRecognitionEvaluator;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -30,10 +35,36 @@ class FhirBundleBuilderTest {
 
     private static final FhirContext CTX = FhirContext.forR4();
     private static final String ACCESSION = "ACC-2026-001";
-    private static final String ANALYZER_ID = "MINDRAY-BC5380";
 
     private Bundle parseBundle(String json) {
         return CTX.newJsonParser().parseResource(Bundle.class, json);
+    }
+
+    private String buildBundle(List<AnalyzerResult> results) {
+        boolean containsControl = results.stream().anyMatch(AnalyzerResult::isControl);
+        ControlResultRecognition recognition = containsControl
+                ? ControlResultRecognition.rules(List.of(new ControlRecognitionRule(
+                        "test-control", "SPECIMEN_ID_PREFIX", null, "ACC-", null, null)))
+                : ControlResultRecognition.none();
+        List<AnalyzerResult> assessed = results;
+        if (containsControl) {
+            ControlResultRecognitionEvaluator.Assessment assessment =
+                    ControlResultRecognitionEvaluator.evaluate(recognition, ACCESSION, java.util.Map.of());
+            assessed = results.stream()
+                    .map(result -> result.withControlRecognition(assessment))
+                    .toList();
+        }
+        AnalyzerContext context = new AnalyzerContext(
+                "bridge-connection-test",
+                "oe-analyzer-test",
+                "site.test-profile",
+                1,
+                "ASTM",
+                "TCP",
+                DeviceInfo.fromSenderToken("127.0.0.1", "TEST"),
+                recognition,
+                "sha256:" + "0".repeat(64));
+        return FhirBundleBuilder.buildNormalizedBundle(ACCESSION, assessed, context, code -> null);
     }
 
     @Nested
@@ -46,7 +77,7 @@ class FhirBundleBuilderTest {
             List<AnalyzerResult> results = List.of(
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
-            String json = FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results);
+            String json = buildBundle(results);
 
             assertNotNull(json);
             assertDoesNotThrow(() -> parseBundle(json));
@@ -59,7 +90,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             assertEquals(Bundle.BundleType.TRANSACTION, bundle.getType());
         }
@@ -72,7 +103,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.text("INTERP", "INTERP", "Normal"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             long specimenCount = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Specimen).count();
@@ -93,7 +124,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             for (Bundle.BundleEntryComponent entry : bundle.getEntry()) {
                 assertEquals(Bundle.HTTPVerb.POST, entry.getRequest().getMethod());
@@ -112,7 +143,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             Specimen specimen = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Specimen)
@@ -134,7 +165,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "White Blood Cells", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -153,7 +184,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -173,7 +204,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.text("INTERP", "Interpretation", "Normal"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -191,7 +222,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("RATIO", "RATIO", "1.5", null));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -215,7 +246,7 @@ class FhirBundleBuilderTest {
                     .withControl(true);
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, List.of(qcResult)));
+                    buildBundle(List.of(qcResult)));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -237,7 +268,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -249,15 +280,16 @@ class FhirBundleBuilderTest {
         }
 
         @Test
-        @DisplayName("QC with lotNumber + controlLevel -> emits qc/lot-number + qc/control-level extensions")
-        void qcExtensionsEmittedForLotAndLevel() {
+        @DisplayName("Control metadata is emitted as explicit FHIR extensions")
+        void controlMetadataExtensionsAreEmitted() {
             AnalyzerResult qcResult = AnalyzerResult.numeric("HIV-VL", "HIV-VL", "1687.5", "copies/mL")
                     .withControl(true)
                     .withLotNumber("LOT-HIVVL-N")
-                    .withControlLevel("LPC");
+                    .withControlLevel("LPC")
+                    .withControlType("ASSAY_CONTROL");
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, List.of(qcResult)));
+                    buildBundle(List.of(qcResult)));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -266,12 +298,16 @@ class FhirBundleBuilderTest {
 
             var lot = obs.getExtensionByUrl("http://openelis-global.org/fhir/qc/lot-number");
             var level = obs.getExtensionByUrl("http://openelis-global.org/fhir/qc/control-level");
+            var type = obs.getExtensionByUrl("http://openelis-global.org/fhir/qc/control-type");
             assertNotNull(lot, "qc/lot-number extension must be present");
             assertNotNull(level, "qc/control-level extension must be present");
+            assertNotNull(type, "qc/control-type extension must be present");
             assertEquals("LOT-HIVVL-N",
                     ((org.hl7.fhir.r4.model.StringType) lot.getValue()).getValue());
             assertEquals("LPC",
                     ((org.hl7.fhir.r4.model.StringType) level.getValue()).getValue());
+            assertEquals("ASSAY_CONTROL",
+                    ((org.hl7.fhir.r4.model.StringType) type.getValue()).getValue());
         }
 
         @Test
@@ -281,7 +317,7 @@ class FhirBundleBuilderTest {
                     .withControl(true);
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, List.of(qcResult)));
+                    buildBundle(List.of(qcResult)));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -290,6 +326,7 @@ class FhirBundleBuilderTest {
 
             assertNull(obs.getExtensionByUrl("http://openelis-global.org/fhir/qc/lot-number"));
             assertNull(obs.getExtensionByUrl("http://openelis-global.org/fhir/qc/control-level"));
+            assertNull(obs.getExtensionByUrl("http://openelis-global.org/fhir/qc/control-type"));
         }
     }
 
@@ -304,7 +341,7 @@ class FhirBundleBuilderTest {
                     .withTimestamp("2026-03-26T12:00:00");
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, List.of(result)));
+                    buildBundle(List.of(result)));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -321,7 +358,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             Observation obs = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Observation)
@@ -344,7 +381,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("RBC", "RBC", "4.82", "10*6/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             // Collect Observation fullUrls
             List<String> obsUrls = bundle.getEntry().stream()
@@ -375,7 +412,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             String specimenUrl = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Specimen)
@@ -398,7 +435,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             String specimenUrl = bundle.getEntry().stream()
                     .filter(e -> e.getResource() instanceof Specimen)
@@ -421,7 +458,7 @@ class FhirBundleBuilderTest {
                     AnalyzerResult.numeric("WBC", "WBC", "7.5", "10*3/uL"));
 
             Bundle bundle = parseBundle(
-                    FhirBundleBuilder.buildBundle(ACCESSION, ANALYZER_ID, results));
+                    buildBundle(results));
 
             for (Bundle.BundleEntryComponent entry : bundle.getEntry()) {
                 assertTrue(entry.getFullUrl().startsWith("urn:uuid:"),

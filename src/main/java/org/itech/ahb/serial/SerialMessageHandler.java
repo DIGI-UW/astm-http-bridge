@@ -5,7 +5,6 @@ import org.itech.ahb.model.Protocol;
 import org.itech.ahb.model.Transport;
 import org.itech.ahb.normalizer.MessageEnvelope;
 import org.itech.ahb.normalizer.MessageNormalizer;
-import org.itech.ahb.util.ProtocolDetector;
 import org.springframework.stereotype.Service;
 
 /**
@@ -13,7 +12,7 @@ import org.springframework.stereotype.Service;
  * <p>
  * This service:
  * <ul>
- *   <li>Detects the message protocol (ASTM, HL7, CSV)</li>
+   *   <li>Uses the explicit ASTM or HL7 protocol from the pinned profile</li>
  *   <li>Creates a MessageEnvelope with serial transport metadata</li>
  *   <li>Delegates to {@link MessageNormalizer} for routing to OpenELIS</li>
  * </ul>
@@ -44,23 +43,31 @@ public class SerialMessageHandler {
     /**
      * Handles a complete message received from a serial port.
      * <p>
-     * Detects the protocol, creates a MessageEnvelope, and delegates to the
+     * Uses the pinned profile protocol, creates a MessageEnvelope, and delegates to the
      * {@link MessageNormalizer} for routing to OpenELIS.
      * </p>
      *
      * @param message the complete message content
-     * @param serialPortPath the serial port path (e.g., /dev/ttyUSB0)
-     * @param analyzerId optional analyzer ID from configuration
+     * @param serialPortPath stable source binding registered for this connection;
+     *                       it is not required to be a physical device path
+     * @param analyzerId optional corroborating protocol hint, not routing authority
+     * @param protocol protocol declared by the pinned analyzer profile
      * @return the result of handling the message
      */
-    public HandleResult handleMessage(String message, String serialPortPath, String analyzerId) {
+    public HandleResult handleMessage(
+        String message,
+        String serialPortPath,
+        String analyzerId,
+        Protocol protocol
+    ) {
         if (message == null || message.isEmpty()) {
             log.warn("Received empty message from serial port {}", serialPortPath);
             return new HandleResult(false, "Empty message");
         }
 
-        // Detect protocol
-        Protocol protocol = ProtocolDetector.detect(message);
+        if (protocol != Protocol.ASTM && protocol != Protocol.HL7) {
+            throw new IllegalArgumentException("Serial messages require an explicit ASTM or HL7 profile protocol");
+        }
         log.info("Received {} message from serial port {} ({} bytes)",
             protocol, serialPortPath, message.length());
 
