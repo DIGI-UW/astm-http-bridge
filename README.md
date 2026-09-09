@@ -282,6 +282,16 @@ Active connections have distinct runtime registrations even when they share an
 analyzer host. A host-only inbound lookup is accepted only when it identifies one
 active connection; shared hosts require a connection-specific source binding.
 
+HTTP input ignores `X-Forwarded-For`, `X-Real-IP`, and `X-Forwarded-Port` by default.
+Behind a reverse proxy, set `bridge.http.trusted-proxies` to a comma-separated
+string of trusted proxy IP addresses (for example, `"192.0.2.2,192.0.2.3"`). Only these
+socket peers may supply forwarded identity. The address chain is read from right
+to left and stops at the first untrusted peer, so a client-supplied prefix cannot
+choose a different analyzer. Configure trusted proxies to append the actual peer
+address and overwrite forwarded port and real-IP headers. Do not enable generic
+servlet/container forwarded-header rewriting: keep
+`server.forward-headers-strategy=none` so Bridge can inspect the real socket peer.
+
 ### Configuration
 
 ```yaml

@@ -18,6 +18,9 @@
 
 # Bridge Configuration (NEW FORMAT - v2.0+)
 bridge:
+  http:
+    # Comma-separated proxy IPs; empty means forwarded identity headers are ignored.
+    trusted-proxies: ${BRIDGE_HTTP_TRUSTED_PROXIES:}
   # Security configuration for the /input HTTP endpoint (M7.1)
   # Protects against unauthorized data injection via the HTTP transport.
   # Non-HTTP transports (ASTM/TCP, MLLP, Serial, File) are unaffected.
@@ -106,6 +109,7 @@ org:
 # Server configuration
 server:
   port: 8443
+  forward-headers-strategy: none
 
 # Logging configuration
 logging:
