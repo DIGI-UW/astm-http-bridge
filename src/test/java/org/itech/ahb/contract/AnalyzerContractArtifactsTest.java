@@ -32,8 +32,7 @@ class AnalyzerContractArtifactsTest {
   private static final ObjectMapper JSON = new ObjectMapper();
   private static final FhirContext FHIR = FhirContext.forR4();
   private static final JsonSchemaFactory SCHEMAS = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
-  private static final String CONNECTION_ID_SYSTEM =
-    "https://openelis-global.org/fhir/analyzer-connection-id";
+  private static final String CONNECTION_ID_SYSTEM = "https://openelis-global.org/fhir/analyzer-connection-id";
   private static final String RAW_CODE_SYSTEM = "https://openelis-global.org/fhir/CodeSystem/analyzer-raw-code";
   private static final String SOURCE_TRANSPORT_EXTENSION =
     "https://openelis-global.org/fhir/StructureDefinition/analyzer-source-transport";
@@ -113,9 +112,9 @@ class AnalyzerContractArtifactsTest {
       .path("profiles")
       .path(0)
       .path("controlRecognitionSummary");
-    JsonNode summarySchema = JSON.readTree(
-      CONTRACT_ROOT.resolve("profile-catalog-entry.schema.json").toFile()
-    ).path("properties").path("controlRecognitionSummary");
+    JsonNode summarySchema = JSON.readTree(CONTRACT_ROOT.resolve("profile-catalog-entry.schema.json").toFile())
+      .path("properties")
+      .path("controlRecognitionSummary");
     Set<ValidationMessage> messages = SCHEMAS.getSchema(summarySchema).validate(summary);
     assertTrue(messages.isEmpty(), messages.toString());
     assertEquals("RULES", summary.path("mode").asText());
@@ -174,6 +173,15 @@ class AnalyzerContractArtifactsTest {
       JsonNode fixture = fixture(fixtureName);
       JsonNode device = firstResource(fixture, "Device");
       assertTrue(hasIdentifier(device, CONNECTION_ID_SYSTEM, "bridge-connection-7f3c"));
+
+      JsonNode duplicateIdentity = fixture.deepCopy();
+      var identifiers = (com.fasterxml.jackson.databind.node.ArrayNode) firstResource(duplicateIdentity, "Device").path(
+        "identifier"
+      );
+      var duplicate = identifiers.addObject().put("system", CONNECTION_ID_SYSTEM).put("value", "another-connection");
+      assertFalse(validationMessages("normalized-fhir-bundle.schema.json", duplicateIdentity).isEmpty());
+      duplicate.remove("value");
+      assertFalse(validationMessages("normalized-fhir-bundle.schema.json", duplicateIdentity).isEmpty());
 
       com.fasterxml.jackson.databind.node.ObjectNode withoutConnectionId = fixture.deepCopy();
       removeIdentifier(firstResource(withoutConnectionId, "Device"), CONNECTION_ID_SYSTEM);

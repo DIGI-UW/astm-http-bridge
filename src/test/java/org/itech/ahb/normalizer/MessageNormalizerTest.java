@@ -145,6 +145,7 @@ class MessageNormalizerTest {
             entry.setId("44");
             entry.setName("Demo: GeneXpert ASTM");
             entry.setExpectedProtocol("ASTM");
+            entry.setInboundTransport("TCP/IP");
             registry.register("10.42.59.10", entry);
 
             MessageNormalizer metadataAwareNormalizer =
@@ -185,6 +186,75 @@ class MessageNormalizerTest {
             assertFalse(result);
             verifyNoInteractions(mockForwardingRouter);
         }
+    }
+
+    @Nested
+    @DisplayName("Routing Tests")
+    class ConnectionTransportTests {
+
+      @Test
+      void rejectsSavedProtocolOrTransportMismatchBeforeForwarding() {
+        AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
+        var entry = new AnalyzerRuntimeRegistry.AnalyzerEntry();
+        entry.setId("DEFAULT-ANALYZER");
+        entry.setExpectedProtocol("FILE");
+        entry.setInboundTransport("HTTP");
+        registry.register("connection:test", entry);
+        var bound = new MessageNormalizer(mockForwardingRouter, mockIdentifier, registry, null, null);
+        for (MessageEnvelope envelope : new MessageEnvelope[] {
+          MessageEnvelope.builder()
+            .protocol(Protocol.HL7)
+            .transport(Transport.HTTP)
+            .sourceId("connection:test")
+            .rawMessage("MSH|^~\\&|||")
+            .build(),
+          MessageEnvelope.builder()
+            .protocol(Protocol.CSV)
+            .transport(Transport.FILE)
+            .sourceId("connection:test")
+            .rawMessage("sample,result\n1,2")
+            .build(),
+          MessageEnvelope.builder()
+            .protocol(Protocol.ASTM)
+            .transport(Transport.HTTP)
+            .sourceId("connection:test")
+            .rawMessage("H|\\^&|||TEST\rQ|1|sample\rL|1|N")
+            .build()
+        }) {
+          assertFalse(bound.process(envelope));
+        }
+        verifyNoInteractions(mockForwardingRouter);
+      }
+
+      @Test
+      void acceptsPinnedProtocolTransportPairs() {
+        for (Object[] pair : new Object[][] {
+          { "FILE", "HTTP", Protocol.CSV, Transport.HTTP },
+          { "FILE", "FILE", Protocol.CSV, Transport.FILE },
+          { "ASTM", "TCP/IP", Protocol.ASTM, Transport.TCP },
+          { "ASTM", "RS-232", Protocol.ASTM, Transport.SERIAL },
+          { "HL7", "TCP/IP", Protocol.HL7, Transport.MLLP }
+        }) {
+          AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
+          var entry = new AnalyzerRuntimeRegistry.AnalyzerEntry();
+          entry.setId("DEFAULT-ANALYZER");
+          entry.setExpectedProtocol((String) pair[0]);
+          entry.setInboundTransport((String) pair[1]);
+          registry.register("connection:test", entry);
+          var bound = new MessageNormalizer(mockForwardingRouter, mockIdentifier, registry, null, null);
+          assertTrue(
+            bound.process(
+              MessageEnvelope.builder()
+                .protocol((Protocol) pair[2])
+                .transport((Transport) pair[3])
+                .sourceId("connection:test")
+                .rawMessage("result")
+                .build()
+            )
+          );
+        }
+        verify(mockForwardingRouter, times(5)).route(any());
+      }
     }
 
     @Nested

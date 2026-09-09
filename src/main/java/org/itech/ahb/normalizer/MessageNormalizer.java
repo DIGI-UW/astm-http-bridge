@@ -6,6 +6,7 @@ import java.util.regex.Pattern;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry;
 import org.itech.ahb.metrics.MetricsService;
 import org.itech.ahb.model.Protocol;
+import org.itech.ahb.model.Transport;
 import org.itech.ahb.routing.HttpForwardingRouter;
 import org.itech.ahb.routing.MessageRouter;
 import org.itech.ahb.util.DeadLetterWriter;
@@ -143,6 +144,20 @@ public class MessageNormalizer implements MessageRouter {
 
         String protocolHint = envelope.getProtocolAnalyzerHint();
 
+        AnalyzerRuntimeRegistry.AnalyzerEntry registryEntry = registry != null
+          ? registry.findAnalyzerEntry(envelope.getSourceId()).orElse(null)
+          : null;
+        if (registry != null && !matchesSavedTransport(envelope, registryEntry)) {
+          recordIdentity(protocol, transport, "transport_mismatch");
+          log.warn(
+            "Rejecting protocol/transport inconsistent with saved connection for source '{}'",
+            envelope.getSourceId()
+          );
+          if (deadLetterWriter != null) deadLetterWriter.write(envelope, "CONNECTION_TRANSPORT_MISMATCH");
+          if (metricsService != null) metricsService.recordRouted(sample, protocol, transport, false);
+          return false;
+        }
+
         // Skip ASTM Q-only messages (queries with no R-records) — they don't carry
         // results to forward. Until bidirectional order-response is implemented
         // (OGC-335/336), log INFO and ack as success. Without this, the result
@@ -171,10 +186,6 @@ public class MessageNormalizer implements MessageRouter {
             }
             return false;
         }
-
-        AnalyzerRuntimeRegistry.AnalyzerEntry registryEntry = registry != null
-            ? registry.findAnalyzerEntry(envelope.getSourceId()).orElse(null)
-            : null;
 
         // The source-bound saved connection is routing authority. A protocol hint
         // can corroborate or contradict it, but never replace it.
@@ -226,6 +237,20 @@ public class MessageNormalizer implements MessageRouter {
         }
 
         return success;
+    }
+
+    private boolean matchesSavedTransport(MessageEnvelope envelope, AnalyzerRuntimeRegistry.AnalyzerEntry entry) {
+      if (entry == null) return false;
+      String savedProtocol = entry.getExpectedProtocol();
+      String actualProtocol = envelope.getProtocol() == Protocol.CSV ? "FILE" : envelope.getProtocol().name();
+      if (!actualProtocol.equals(savedProtocol)) return false;
+      Transport actualTransport = envelope.getTransport();
+      String savedTransport = entry.getInboundTransport();
+      if ("TCP/IP".equals(savedTransport)) {
+        return "HL7".equals(savedProtocol) ? actualTransport == Transport.MLLP : actualTransport == Transport.TCP;
+      }
+      if ("RS-232".equals(savedTransport)) return actualTransport == Transport.SERIAL;
+      return actualTransport.name().equals(savedTransport);
     }
 
     /**

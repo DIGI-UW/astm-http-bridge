@@ -2,7 +2,7 @@
 
 > Superseded historical contract. Source headers do not identify an analyzer in
 > the current normalized result path. The current versioned contract is
-> `contracts/analyzer/v1/normalized-result.schema.json`.
+> `contracts/analyzer/v1/normalized-fhir-bundle.schema.json`.
 
 **Feature**: 001-bi-directional-astm  
 **Date**: 2025-12-03  

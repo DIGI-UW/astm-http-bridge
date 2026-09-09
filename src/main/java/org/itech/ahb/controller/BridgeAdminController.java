@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
+import org.itech.ahb.connection.AnalyzerConnectionCatalog;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry.AnalyzerEntry;
 import org.itech.ahb.file.FileStateStore;
@@ -39,15 +40,21 @@ public class BridgeAdminController {
 
   private final AnalyzerRuntimeRegistry registry;
   private final FileStateStore fileStateStore;
+  private final AnalyzerConnectionCatalog connections;
 
   // FileStateStore only exists when file handling is enabled
   // (StateStoreConfig is @ConditionalOnProperty bridge.file.enabled). The
   // admin controller must still load (and serve watch-dir cleanup) when
   // file mode is off, so the store is an optional dependency — null then,
   // and the SQLite-row reset below is simply skipped.
-  public BridgeAdminController(AnalyzerRuntimeRegistry registry, @Nullable FileStateStore fileStateStore) {
+  public BridgeAdminController(
+    AnalyzerRuntimeRegistry registry,
+    @Nullable FileStateStore fileStateStore,
+    AnalyzerConnectionCatalog connections
+  ) {
     this.registry = registry;
     this.fileStateStore = fileStateStore;
+    this.connections = connections;
   }
 
   /**
@@ -71,9 +78,11 @@ public class BridgeAdminController {
       return ResponseEntity.badRequest().body(Map.of("reset", false, "error", "analyzerId is required"));
     }
 
-    // Registration changes use this same monitor. Keep ownership stable through cleanup.
-    synchronized (registry) {
-      return resetExclusive(analyzerId);
+    // Match catalog -> registry lock order used by connection activation and updates.
+    synchronized (connections) {
+      synchronized (registry) {
+        return resetExclusive(analyzerId);
+      }
     }
   }
 
@@ -82,6 +91,15 @@ public class BridgeAdminController {
     Set<Path> files = new LinkedHashSet<>();
     List<String> watchDirs = new ArrayList<>();
     try {
+      for (var claim : connections.fileDirectoryClaims()) {
+        Path directory = claim.directory().toAbsolutePath().normalize();
+        if (Files.exists(directory)) directory = directory.toRealPath();
+        AnalyzerEntry owner = new AnalyzerEntry();
+        owner.setId(claim.analyzerId());
+        owner.setFilePattern(claim.filePattern());
+        byDirectory.computeIfAbsent(directory, ignored -> new ArrayList<>()).add(owner);
+      }
+      // Include active settings too: a saved edit may not have been activated yet.
       for (Map.Entry<String, AnalyzerEntry> registration : registry.getRegisteredAnalyzers().entrySet()) {
         AnalyzerEntry entry = registration.getValue();
         if ("HTTP".equals(entry.getInboundTransport())) continue;

@@ -73,6 +73,27 @@ class AnalyzerConnectionCatalogTest {
   }
 
   @Test
+  void inactiveFileOwnershipSurvivesCatalogRestartAndDeactivation() {
+    ObjectNode profile = profiles.require("fluorocycler-xt", 1).profile();
+    AnalyzerConnectionCatalog catalog = catalog(UUID::randomUUID);
+    Path shared = temporaryDirectory.resolve("shared");
+    ObjectNode firstRequest = createRequest(profile, "first-file", "first");
+    firstRequest.withObject("values").put("directory", shared.toString());
+    ObjectNode secondRequest = createRequest(profile, "second-file", "second");
+    secondRequest.withObject("values").put("directory", shared.toString());
+    ObjectNode first = catalog.create(firstRequest);
+    catalog.create(secondRequest);
+    catalog.applyRuntimeCommand(runtimeCommand(first, "activate-first", "ACTIVATE"));
+    catalog.applyRuntimeCommand(runtimeCommand(first, "deactivate-first", "DEACTIVATE"));
+    assertThat(catalog.fileDirectoryClaims())
+      .extracting(AnalyzerConnectionCatalog.FileDirectoryClaim::analyzerId)
+      .containsExactlyInAnyOrder("first", "second");
+    assertThat(catalog(UUID::randomUUID).fileDirectoryClaims()).containsExactlyInAnyOrderElementsOf(
+      catalog.fileDirectoryClaims()
+    );
+  }
+
+  @Test
   void updateRequiresTheCurrentRevisionAndKeepsTheExactProfilePin() {
     ObjectNode profile = profiles.require("genexpert-astm", 1).profile();
     AnalyzerConnectionCatalog catalog = catalog(() -> UUID.fromString("00000000-0000-0000-0000-000000000099"));

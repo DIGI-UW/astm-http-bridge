@@ -428,7 +428,7 @@ openelis-analyzer-bridge/
 
 ## Contracts
 
-- `contracts/analyzer/v1/normalized-result.schema.json`: normalized result
+- `contracts/analyzer/v1/normalized-fhir-bundle.schema.json`: normalized result
   contract consumed by OpenELIS
 - `contracts/analyzer/v1/fixtures/`: canonical ASTM, HL7, and FILE examples
 - `src/main/resources/analyzer-profiles/`: shipped analyzer type profiles

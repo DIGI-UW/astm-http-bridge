@@ -11,6 +11,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import org.itech.ahb.connection.AnalyzerConnectionCatalog;
+import org.itech.ahb.connection.AnalyzerConnectionCatalog.FileDirectoryClaim;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry.AnalyzerEntry;
 import org.itech.ahb.file.FileStateStore;
@@ -23,6 +25,26 @@ class BridgeAdminControllerTest {
   @TempDir
   Path watchDirectory;
 
+  private final AnalyzerConnectionCatalog connections = mock(AnalyzerConnectionCatalog.class);
+
+  @Test
+  void inactiveSavedConnectionStillPreventsSharedDirectoryReset() throws Exception {
+    Path pending = Files.writeString(watchDirectory.resolve("result.csv"), "data");
+    AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
+    register(registry, "active", watchDirectory, "*.csv");
+    when(connections.fileDirectoryClaims()).thenReturn(
+      List.of(
+        new FileDirectoryClaim("active", watchDirectory, "*.csv"),
+        new FileDirectoryClaim("inactive", watchDirectory.resolve("."), "*.csv")
+      )
+    );
+    FileStateStore store = mock(FileStateStore.class);
+    var response = new BridgeAdminController(registry, store, connections).reset("active");
+    assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
+    assertEquals("data", Files.readString(pending));
+    verifyNoInteractions(store);
+  }
+
   @Test
   void httpFileConnectionHasNoWatchDirectoryToReset() {
     AnalyzerEntry entry = new AnalyzerEntry();
@@ -32,7 +54,7 @@ class BridgeAdminControllerTest {
     entry.setFilePattern("*.csv");
     AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
     registry.register("connection:http", entry);
-    var response = new BridgeAdminController(registry, null).reset("http");
+    var response = new BridgeAdminController(registry, null, connections).reset("http");
     assertEquals(HttpStatus.OK, response.getStatusCode());
     assertEquals(List.of(), response.getBody().get("watchDirectories"));
     assertEquals(0, response.getBody().get("filesRemoved"));
@@ -54,7 +76,7 @@ class BridgeAdminControllerTest {
     FileStateStore stateStore = mock(FileStateStore.class);
     when(stateStore.deleteAllForAnalyzer("5")).thenReturn(1);
 
-    var response = new BridgeAdminController(registry, stateStore).reset("5");
+    var response = new BridgeAdminController(registry, stateStore, connections).reset("5");
 
     assertEquals(HttpStatus.OK, response.getStatusCode());
     assertEquals(1, response.getBody().get("stateRowsRemoved"));
@@ -72,7 +94,7 @@ class BridgeAdminControllerTest {
     register(registry, "second", watchDirectory.resolve("."), "second*.csv");
     FileStateStore store = mock(FileStateStore.class);
 
-    var response = new BridgeAdminController(registry, store).reset("first");
+    var response = new BridgeAdminController(registry, store, connections).reset("first");
 
     assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
     assertEquals(false, response.getBody().get("reset"));
@@ -92,7 +114,7 @@ class BridgeAdminControllerTest {
     register(registry, "second", shared, "second*.csv");
     FileStateStore store = mock(FileStateStore.class);
 
-    var response = new BridgeAdminController(registry, store).reset("first");
+    var response = new BridgeAdminController(registry, store, connections).reset("first");
 
     assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
     assertTrue(Files.exists(pending));
@@ -107,7 +129,7 @@ class BridgeAdminControllerTest {
     AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
     register(registry, "first", watchDirectory, "*.csv");
 
-    var response = new BridgeAdminController(registry, null).reset("first");
+    var response = new BridgeAdminController(registry, null, connections).reset("first");
 
     assertEquals(HttpStatus.OK, response.getStatusCode());
     assertFalse(Files.exists(owned));
@@ -126,7 +148,7 @@ class BridgeAdminControllerTest {
     register(registry, "second", alias, "*.csv");
     FileStateStore store = mock(FileStateStore.class);
 
-    var response = new BridgeAdminController(registry, store).reset("first");
+    var response = new BridgeAdminController(registry, store, connections).reset("first");
 
     assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
     assertTrue(Files.exists(pending));

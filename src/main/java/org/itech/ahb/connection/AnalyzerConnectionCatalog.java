@@ -178,6 +178,31 @@ public final class AnalyzerConnectionCatalog {
     return view(record, profile);
   }
 
+  /** Saved FILE ownership includes inactive connections; runtime registration is not ownership. */
+  public synchronized java.util.List<FileDirectoryClaim> fileDirectoryClaims() {
+    var claims = new ArrayList<FileDirectoryClaim>();
+    for (ObjectNode record : connections.values()) {
+      ObjectNode profile = requirePinnedProfile((ObjectNode) record.path("profileRef"));
+      JsonNode values = record.path("values");
+      if (
+        !"FILE".equals(profile.path("protocol").path("name").asText()) ||
+        "HTTP".equals(values.path("transport").asText())
+      ) continue;
+      String directory = values.path("directory").asText();
+      if (directory.isBlank()) continue;
+      claims.add(
+        new FileDirectoryClaim(
+          record.path("clientAnalyzerId").asText(),
+          Path.of(directory),
+          values.path("filePattern").asText()
+        )
+      );
+    }
+    return java.util.List.copyOf(claims);
+  }
+
+  public record FileDirectoryClaim(String analyzerId, Path directory, String filePattern) {}
+
   public synchronized ObjectNode probe(ObjectNode request, AnalyzerConnectionProbe probe) {
     requireVersion(request);
     requireText(request, "requestId");
