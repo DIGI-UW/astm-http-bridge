@@ -148,12 +148,13 @@ public class MessageNormalizer implements MessageRouter {
           ? registry.findAnalyzerEntry(envelope.getSourceId()).orElse(null)
           : null;
         if (registry != null && !matchesSavedTransport(envelope, registryEntry)) {
-          recordIdentity(protocol, transport, "transport_mismatch");
+          recordIdentity(protocol, transport, registryEntry == null ? "unregistered_source" : "transport_mismatch");
           log.warn(
             "Rejecting protocol/transport inconsistent with saved connection for source '{}'",
             envelope.getSourceId()
           );
-          if (deadLetterWriter != null) deadLetterWriter.write(envelope, "CONNECTION_TRANSPORT_MISMATCH");
+          if (deadLetterWriter != null) deadLetterWriter.write(envelope,
+              registryEntry == null ? "UNREGISTERED_SOURCE" : "CONNECTION_TRANSPORT_MISMATCH");
           if (metricsService != null) metricsService.recordRouted(sample, protocol, transport, false);
           return false;
         }

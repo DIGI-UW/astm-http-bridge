@@ -53,6 +53,8 @@ class MessageNormalizerIdentityCorroborationTest {
         AnalyzerEntry entry = new AnalyzerEntry();
         entry.setId(id);
         entry.setName(name);
+        entry.setExpectedProtocol("HL7");
+        entry.setInboundTransport("TCP/IP");
         analyzerRegistry.register(SOURCE_IP, entry);
     }
 
@@ -126,6 +128,8 @@ class MessageNormalizerIdentityCorroborationTest {
         AnalyzerEntry entry = new AnalyzerEntry();
         entry.setId(id);
         entry.setName(name);
+        entry.setExpectedProtocol("HL7");
+        entry.setInboundTransport("TCP/IP");
         entry.setIdentifierPattern(identifierPattern);
         analyzerRegistry.register(SOURCE_IP, entry);
     }
