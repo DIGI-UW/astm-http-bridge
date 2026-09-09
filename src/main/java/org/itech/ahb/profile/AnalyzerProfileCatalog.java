@@ -143,7 +143,7 @@ public final class AnalyzerProfileCatalog {
     ObjectNode profile = candidate.deepCopy();
     profile.put("$schema", PROFILE_SCHEMA);
     profile.put("schemaVersion", PROFILE_SCHEMA_VERSION);
-    ObjectNode profileMeta = profile.withObject("profileMeta");
+    ObjectNode profileMeta = profileMetadata(profile);
     String profileId = current.profile().path("profileMeta").path("id").asText();
     profileMeta.put("id", profileId);
     if (!profileMeta.has("displayName")) {
@@ -332,11 +332,18 @@ public final class AnalyzerProfileCatalog {
     return validator.validationIssues(publicationCandidate(draft, draft.updatedBy(), draft.updatedAt()));
   }
 
+  private static ObjectNode profileMetadata(ObjectNode profile) {
+    if (profile.has("profileMeta") && !profile.path("profileMeta").isObject()) {
+      throw new ProfileCatalogException("profileMeta must be an object");
+    }
+    return profile.withObject("profileMeta");
+  }
+
   private ObjectNode publicationCandidate(ProfileDraft draft, String actor, Instant publishedAt) {
     ObjectNode profile = draft.profile();
     profile.put("$schema", PROFILE_SCHEMA);
     profile.put("schemaVersion", PROFILE_SCHEMA_VERSION);
-    ObjectNode profileMeta = profile.withObject("profileMeta");
+    ObjectNode profileMeta = profileMetadata(profile);
     String profileId = draft.profile().path("profileMeta").path("id").asText();
     profileMeta.put("id", profileId);
 

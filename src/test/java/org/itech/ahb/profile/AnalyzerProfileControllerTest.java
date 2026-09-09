@@ -59,6 +59,22 @@ class AnalyzerProfileControllerTest {
   }
 
   @Test
+  void malformedProfileMetadataReturnsBadRequestAndLeavesDraftUnchanged() throws Exception {
+    ProfileDraft draft = catalog.createDraft("Invalid metadata test", "author");
+    for (String malformed : List.of("\"wrong\"", "[]", "null", "7")) {
+      mockMvc
+        .perform(
+          put("/api/profiles/drafts/{draftId}", draft.draftId())
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"actor\":\"author\",\"profile\":{\"profileMeta\":" + malformed + "}}")
+        )
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.error").value("profileMeta must be an object"));
+      assertThat(catalog.requireDraft(draft.draftId()).profile()).isEqualTo(draft.profile());
+    }
+  }
+
+  @Test
   void createsEditsAndPublishesADraftWithoutAnImmediateProfileRevision() throws Exception {
     MvcResult createdResult = mockMvc
       .perform(
