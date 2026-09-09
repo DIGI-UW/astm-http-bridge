@@ -289,7 +289,7 @@ public class AnalyzerInputController {
    * Content-Type hints:
    * <ul>
    *   <li>application/hl7-v2, x-application/hl7-v2 → HL7</li>
-   *   <li>text/csv, application/csv → CSV</li>
+   *   <li>text/csv, application/csv, text/tab-separated-values → tabular input</li>
    *   <li>application/x-astm, text/astm → ASTM</li>
    *   <li>text/plain, other, or missing → auto-detect from content</li>
    * </ul>
@@ -315,7 +315,7 @@ public class AnalyzerInputController {
       }
 
       // Check for CSV content type
-      if (ct.equals("text/csv") || ct.equals("application/csv")) {
+      if (ct.equals("text/csv") || ct.equals("application/csv") || ct.equals("text/tab-separated-values")) {
         return Protocol.CSV;
       }
 

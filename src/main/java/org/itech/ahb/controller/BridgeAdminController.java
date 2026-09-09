@@ -84,6 +84,7 @@ public class BridgeAdminController {
     try {
       for (Map.Entry<String, AnalyzerEntry> registration : registry.getRegisteredAnalyzers().entrySet()) {
         AnalyzerEntry entry = registration.getValue();
+        if ("HTTP".equals(entry.getInboundTransport())) continue;
         if (
           !"FILE".equalsIgnoreCase(entry.getExpectedProtocol()) && !"CSV".equalsIgnoreCase(entry.getExpectedProtocol())
         ) continue;

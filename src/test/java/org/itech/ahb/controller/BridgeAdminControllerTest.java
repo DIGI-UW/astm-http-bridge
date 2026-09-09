@@ -24,6 +24,21 @@ class BridgeAdminControllerTest {
   Path watchDirectory;
 
   @Test
+  void httpFileConnectionHasNoWatchDirectoryToReset() {
+    AnalyzerEntry entry = new AnalyzerEntry();
+    entry.setId("http");
+    entry.setExpectedProtocol("FILE");
+    entry.setInboundTransport("HTTP");
+    entry.setFilePattern("*.csv");
+    AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
+    registry.register("connection:http", entry);
+    var response = new BridgeAdminController(registry, null).reset("http");
+    assertEquals(HttpStatus.OK, response.getStatusCode());
+    assertEquals(List.of(), response.getBody().get("watchDirectories"));
+    assertEquals(0, response.getBody().get("filesRemoved"));
+  }
+
+  @Test
   void resetCleansTheActualDirectoryForAConnectionScopedFileRegistryKey() throws Exception {
     Path staleResult = Files.writeString(watchDirectory.resolve("stale-result.xlsx"), "fixture");
     AnalyzerEntry analyzer = new AnalyzerEntry();

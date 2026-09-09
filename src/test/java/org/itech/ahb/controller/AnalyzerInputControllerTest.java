@@ -570,6 +570,7 @@ class AnalyzerInputControllerTest {
     void detectProtocolCSVContentType() {
       assertEquals(Protocol.CSV, controller.detectProtocol("text/csv", ""));
       assertEquals(Protocol.CSV, controller.detectProtocol("application/csv", ""));
+      assertEquals(Protocol.CSV, controller.detectProtocol("text/tab-separated-values; charset=UTF-8", "a\tb\n1\t2"));
     }
 
     @Test

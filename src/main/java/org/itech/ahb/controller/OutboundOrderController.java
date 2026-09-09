@@ -103,7 +103,7 @@ public class OutboundOrderController {
     }
 
     String protocol = entry.getExpectedProtocol() == null ? "" : entry.getExpectedProtocol().toUpperCase();
-    if (!protocol.startsWith("HL7") && !protocol.startsWith("ASTM")) {
+    if (!entry.isOutboundOrdersSupported() || (!protocol.startsWith("HL7") && !protocol.startsWith("ASTM"))) {
       response.put("dispatched", false);
       response.put("error", "Bridge connection " + request.connectionId + " does not support outbound orders");
       return ResponseEntity.badRequest().body(response);

@@ -64,6 +64,7 @@ class OutboundOrderControllerTest {
     e.setOutboundHost(host);
     e.setOutboundPort(port);
     e.setExpectedProtocol(protocol);
+    e.setOutboundOrdersSupported(true);
     e.setCodeToLoinc(codeToLoinc);
     registry.register("connection:" + connectionId, e);
   }
@@ -171,6 +172,38 @@ class OutboundOrderControllerTest {
       verify(astm).send(eq("192.0.2.10"), eq(port), Mockito.anyList(), anyInt());
     }
     Mockito.verifyNoInteractions(mllp);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "outboundOrders", "supports_lis_initiated" })
+  void profileCanForbidOrdersEvenWithAnOutboundEndpoint(String disabledCapability) throws Exception {
+    ObjectMapper mapper = new ObjectMapper();
+    ObjectNode profile = (ObjectNode) mapper.readTree(
+      getClass().getResourceAsStream("/analyzer-profiles/genexpert-astm.json")
+    );
+    profile
+      .withObject(disabledCapability.equals("outboundOrders") ? "capabilities" : "communication")
+      .put(disabledCapability, false);
+    ObjectNode connection = mapper
+      .createObjectNode()
+      .put("connectionId", "no-orders")
+      .put("clientAnalyzerId", "oe")
+      .put("displayName", "Inbound only");
+    connection
+      .putObject("profileRef")
+      .put("profileId", profile.path("profileMeta").path("id").asText())
+      .put("revision", 1);
+    connection.putObject("values").setAll((ObjectNode) profile.path("configDefaults").deepCopy());
+    connection.withObject("values").put("connectionRole", "CLIENT").put("host", "192.0.2.10").put("port", 9101);
+    new BridgeAnalyzerConnectionRuntime(
+      registry,
+      null,
+      Mockito.mock(AstmConnectionListeners.class),
+      Mockito.mock(SerialConnectionListeners.class)
+    ).activate(connection, profile);
+    var response = controller.sendOrder(req("no-orders", List.of("85362-2")));
+    assertEquals(400, response.getStatusCode().value());
+    Mockito.verifyNoInteractions(astm, mllp);
   }
 
   @Test

@@ -202,6 +202,9 @@ public class AnalyzerRuntimeRegistry {
     /** Saved transport, used to restrict incoming traffic to the configured delivery path. */
     private String inboundTransport;
 
+    /** True only when the pinned profile explicitly permits LIS-initiated orders. */
+    private boolean outboundOrdersSupported;
+
     /**
      * Expected protocol (ASTM, HL7, CSV) for validation
      */

@@ -272,6 +272,10 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     entry.setName(requiredText(connection, "displayName", "Connection name"));
     entry.setExpectedProtocol(requiredText(profile.path("protocol"), "name", "Profile protocol"));
     entry.setInboundTransport(nullableText(values, "transport"));
+    entry.setOutboundOrdersSupported(
+      profile.path("capabilities").path("outboundOrders").asBoolean(false) &&
+      profile.path("communication").path("supports_lis_initiated").asBoolean(false)
+    );
     if (
       "HTTP".equals(entry.getInboundTransport()) ||
       ("TCP/IP".equals(entry.getInboundTransport()) && "CLIENT".equals(nullableText(values, "connectionRole")))
@@ -284,7 +288,8 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     entry.setFilePattern(nullableText(values, "filePattern"));
     entry.setColumnMappings(textMap(profile.path("column_mapping")));
     entry.setFileFormat(nullableText(values, "fileFormat"));
-    entry.setDelimiter(nullableText(values, "delimiter"));
+    // Whitespace is meaningful for a delimiter (notably a TSV tab).
+    entry.setDelimiter(values.path("delimiter").isTextual() ? values.path("delimiter").asText() : null);
     entry.setSkipRows(values.path("skipRows").asInt(0));
     if ("ASTM".equals(entry.getExpectedProtocol())) {
       entry.setAstmResultRecordSelection(AstmResultRecordSelection.fromProfile(profile.path("configDefaults")));

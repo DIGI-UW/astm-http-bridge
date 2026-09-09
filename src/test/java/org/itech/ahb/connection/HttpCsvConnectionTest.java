@@ -138,6 +138,43 @@ class HttpCsvConnectionTest {
   }
 
   @Test
+  void receivesRealTsvThroughThePinnedTabularParser() throws Exception {
+    profile.withObject("protocol").put("format", "TSV");
+    profile.putArray("supported_extensions").add(".tsv");
+    profile.withObject("configDefaults").put("fileFormat", "TSV").put("filePattern", "*.tsv").put("delimiter", "\t");
+    profile
+      .withObject("catalog")
+      .put("revisionFingerprint", new ProfileFingerprintService().revisionFingerprint(profile));
+    profiles = new AnalyzerProfileCatalog(
+      directory.resolve("tsv-profiles"),
+      List.of(new ByteArrayResource(mapper.writeValueAsBytes(profile))),
+      mapper,
+      Clock.systemUTC()
+    );
+    reopen();
+    activate("oe-http-tsv", "192.0.2.25");
+    String tsv =
+      "Export metadata\nSample ID\tTargetName\tCalc. Conc.\tInterpretation\tType\nSAMPLE-TSV\tVIH-1\t17.5\t\tPatient\n";
+    var response = input
+      .perform(
+        post("/input")
+          .contentType("text/tab-separated-values")
+          .content(tsv)
+          .with(request -> {
+            request.setRemoteAddr("192.0.2.25");
+            return request;
+          })
+      )
+      .andReturn()
+      .getResponse();
+    assertThat(response.getStatus()).isEqualTo(200);
+    assertThat(received).hasSize(1);
+    assertThat(received.get(0).path("identifier").path("value").asText()).startsWith("file-v1:");
+    assertThat(received.get(0).toString()).contains("SAMPLE-TSV", "17.5", "VIH-1");
+    verifyNoInteractions(watcher);
+  }
+
+  @Test
   void receivesRealCsvWithProfileDefaultsAndRestoresTheSameDeliveryIdentity() throws Exception {
     ObjectNode connection = activate("oe-http", "192.0.2.25");
     assertThat(send("192.0.2.25", null)).isEqualTo(200);

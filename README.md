@@ -400,7 +400,7 @@ mvn -Dtest=UnifiedRoutingTest,HttpForwardingRouterTest test
 ```
 
 Cross-process analyzer behavior belongs in
-[DIGI-UW/openelis-analyzer-mock](https://github.com/DIGI-UW/openelis-analyzer-mock),
+[DIGI-UW/analyzer-mock-server](https://github.com/DIGI-UW/analyzer-mock-server),
 which sends real protocol traffic to a running Bridge. Visible OpenELIS user
 stories are tested separately through the browser.
 
