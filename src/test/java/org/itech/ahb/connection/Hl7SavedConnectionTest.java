@@ -3,8 +3,11 @@ package org.itech.ahb.connection;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ca.uhn.fhir.context.FhirContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -19,6 +22,9 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Device;
+import org.hl7.fhir.r4.model.Observation;
 import org.itech.ahb.config.properties.HTTPForwardServerConfigurationProperties;
 import org.itech.ahb.mllp.MLLPConfig;
 import org.itech.ahb.normalizer.AnalyzerIdentifier;
@@ -52,8 +58,16 @@ class Hl7SavedConnectionTest {
     receiver.createContext("/", exchange -> {
       deliveries.add(
         new Delivery(
-          exchange.getRequestHeaders().getFirst(HttpForwardingRouter.HEADER_SOURCE_ID),
-          exchange.getRequestHeaders().getFirst(HttpForwardingRouter.HEADER_ANALYZER_ID),
+          exchange.getRequestURI().getPath(),
+          exchange.getRequestHeaders().getFirst("Content-Type"),
+          exchange
+            .getRequestHeaders()
+            .keySet()
+            .stream()
+            .anyMatch(
+              key ->
+                key.toLowerCase(java.util.Locale.ROOT).startsWith("x-source-") || key.equalsIgnoreCase("X-Analyzer-Id")
+            ),
           new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)
         )
       );
@@ -195,10 +209,9 @@ class Hl7SavedConnectionTest {
     HTTPForwardServerConfigurationProperties forwarding = new HTTPForwardServerConfigurationProperties();
     forwarding.setUri(URI.create("http://127.0.0.1:" + receiver.getAddress().getPort() + "/analyzer"));
     MessageNormalizer normalizer = new MessageNormalizer(
-      new HttpForwardingRouter(forwarding, null, null, registry),
+      new HttpForwardingRouter(forwarding, null, registry),
       new AnalyzerIdentifier(registry),
       registry,
-      null,
       null,
       null
     );
@@ -253,7 +266,8 @@ class Hl7SavedConnectionTest {
       // Both sockets use the same peer IP and a spoofed sender; neither determines identity.
       String message =
         "MSH|^~\\&|SPOOF|OTHER|OE|LAB|20260909120000||ORU^R01|MSG-1|P|2.5.1\r" +
-        "PID|1||PATIENT\rOBR|1||ACCESSION|PANEL\rOBX|1|NM|T1^CONTROL||2|unit\r";
+        "PID|1||PATIENT\rOBR|1||ACCESSION|PANEL\r" +
+        "OBX|1|NM|T1^PATIENT||1|unit\rOBX|2|NM|T2^CONTROL||2|unit\rOBX|3|NM|T3||3|unit\r";
       socket.getOutputStream().write(("\u000b" + message + "\u001c\r").getBytes(StandardCharsets.UTF_8));
       StringBuilder ack = new StringBuilder();
       int next;
@@ -262,9 +276,70 @@ class Hl7SavedConnectionTest {
     }
     Delivery delivery = deliveries.poll(5, TimeUnit.SECONDS);
     assertThat(delivery).isNotNull();
-    assertThat(delivery.source()).isEqualTo("connection:" + id);
-    assertThat(delivery.analyzer()).isEqualTo(analyzerId);
-    assertThat(delivery.body()).contains("ACCESSION", "CONTROL");
+    assertThat(delivery.path()).isEqualTo("/analyzer/fhir");
+    assertThat(delivery.contentType()).startsWith("application/fhir+json");
+    assertThat(delivery.hasLegacyHeaders()).isFalse();
+    assertThat(
+      JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)
+        .getSchema(mapper.readTree(Path.of("contracts/analyzer/v1/normalized-fhir-bundle.schema.json").toFile()))
+        .validate(mapper.readTree(delivery.body()))
+    ).isEmpty();
+    Bundle bundle = FhirContext.forR4Cached().newJsonParser().parseResource(Bundle.class, delivery.body());
+    Device device = bundle
+      .getEntry()
+      .stream()
+      .map(Bundle.BundleEntryComponent::getResource)
+      .filter(Device.class::isInstance)
+      .map(Device.class::cast)
+      .findFirst()
+      .orElseThrow();
+    assertThat(device.getIdentifier())
+      .anySatisfy(identifier -> {
+        assertThat(identifier.getSystem()).isEqualTo("https://openelis-global.org/fhir/analyzer-connection-id");
+        assertThat(identifier.getValue()).isEqualTo(id);
+      })
+      .anySatisfy(identifier -> {
+        assertThat(identifier.getSystem()).isEqualTo("https://openelis-global.org/fhir/analyzer-id");
+        assertThat(identifier.getValue()).isEqualTo(analyzerId);
+      });
+    String root = "https://openelis-global.org/fhir/StructureDefinition/";
+    assertThat(device.getExtensionByUrl(root + "analyzer-profile-id").getValue().primitiveValue()).isEqualTo(
+      "saved-hl7-fixture"
+    );
+    assertThat(device.getExtensionByUrl(root + "analyzer-profile-revision").getValue().primitiveValue()).isEqualTo("1");
+    var observations = bundle
+      .getEntry()
+      .stream()
+      .map(Bundle.BundleEntryComponent::getResource)
+      .filter(Observation.class::isInstance)
+      .map(Observation.class::cast)
+      .toList();
+    assertThat(observations).hasSize(3);
+    for (int index = 0; index < observations.size(); index++) {
+      Observation observation = observations.get(index);
+      assertThat(
+        observation.getExtensionByUrl(root + "analyzer-result-classification").getValue().primitiveValue()
+      ).isEqualTo(index == 1 ? "CONTROL" : "PATIENT");
+      var recognition = observation.getExtensionByUrl(root + "analyzer-control-recognition");
+      assertThat(recognition.getExtensionByUrl("recognitionFingerprint").getValue().primitiveValue()).isEqualTo(
+        profile.path("catalog").path("recognitionFingerprint").asText()
+      );
+      var evidence = recognition.getExtensionByUrl("evaluation");
+      assertThat(evidence.getExtensionByUrl("sourceField").getValue().primitiveValue()).isEqualTo("OBX.3.2");
+      assertThat(evidence.getExtensionByUrl("matched").getValue().primitiveValue()).isEqualTo(
+        Boolean.toString(index == 1)
+      );
+      assertThat(evidence.getExtensionByUrl("sourcePresent").getValue().primitiveValue()).isEqualTo(
+        Boolean.toString(index < 2)
+      );
+      if (index < 2) {
+        assertThat(evidence.getExtensionByUrl("rawValue").getValue().primitiveValue()).isEqualTo(
+          index == 1 ? "CONTROL" : "PATIENT"
+        );
+      } else {
+        assertThat(evidence.getExtensionByUrl("rawValue")).isNull();
+      }
+    }
   }
 
   private static void assertClosed(int port) {
@@ -279,5 +354,5 @@ class Hl7SavedConnectionTest {
     }
   }
 
-  private record Delivery(String source, String analyzer, String body) {}
+  private record Delivery(String path, String contentType, boolean hasLegacyHeaders, String body) {}
 }

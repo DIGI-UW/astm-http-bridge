@@ -20,14 +20,12 @@ Bridge and OpenELIS responsibilities are explicitly separated:
 
 ## Architecture
 
-**Current OGC-1054 delivery boundary:** the working connection paths are priority
-ASTM and FILE, including profile-driven HTTP CSV/TSV input. HL7 has normalized
-contract fixtures and parser coverage, but durable HL7/MLLP connection activation
-is not implemented. Enabling the shared MLLP listener does not create an authorized
-connection; its traffic is rejected. Do not deploy this revision as a replacement
-for a working HL7/MLLP installation until that runtime gap is addressed. The
-protocol diagram and MLLP settings below describe components, not completed
-connection support.
+**Current OGC-1054 delivery boundary:** saved connections support priority ASTM
+and FILE, profile-driven HTTP CSV/TSV input, and inbound HL7/MLLP server listeners.
+HL7 listeners use saved connection identity and the pinned profile's recognition
+rules, and recover the last successfully activated configuration after restart.
+Enabling the HL7 runtime alone creates no listener or authorized connection.
+HL7 TCP client-mode inbound activation remains unsupported and is rejected.
 
 ```
 Analyzer(s)                                    OpenELIS
@@ -400,7 +398,7 @@ mvn verify
 These scripts require saved, active test connections; enabling a transport alone
 does not register an analyzer. For the HL7 script, first activate an HL7 server
 connection, then set `BRIDGE_CONNECTION_ID` and its `BRIDGE_MLLP_PORT`. Set
-`BRIDGE_PASSWORD` (and optionally `BRIDGE_USERNAME`) when API authentication is
+`BRIDGE_PASSWORD` (and optionally `BRIDGE_USER`) when API authentication is
 enabled. Its forwarding destination must be the isolated test WireMock service.
 The script verifies both the protocol acknowledgement and saved connection identity.
 
