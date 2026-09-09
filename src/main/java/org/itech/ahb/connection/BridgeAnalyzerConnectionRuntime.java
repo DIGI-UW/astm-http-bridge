@@ -12,8 +12,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry.AnalyzerEntry;
-import org.itech.ahb.file.FileWatcher;
 import org.itech.ahb.fhir.TabularFileLayout;
+import org.itech.ahb.file.FileWatcher;
 import org.itech.ahb.profile.AstmResultRecordSelection;
 import org.itech.ahb.profile.ControlResultRecognition;
 import org.itech.ahb.profile.TabularResultValueSelection;
@@ -78,12 +78,7 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     String analyzerId = requiredText(connection, "clientAnalyzerId", "OpenELIS analyzer ID");
     ObjectNode values = requiredObject(connection, "values");
     String protocol = requiredText(profile.path("protocol"), "name", "Profile protocol");
-    deactivateTransport(
-      protocol,
-      connectionId,
-      analyzerId,
-      values
-    );
+    deactivateTransport(protocol, connectionId, analyzerId, values);
     registry.unregister(registryKey(protocol, connectionId, values), analyzerId);
   }
 
@@ -116,14 +111,7 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     ObjectNode values = requiredObject(connection, "values");
     registry.register(materialization.registryKey(), materialization.entry());
     try {
-      activateTransport(
-        protocol,
-        connectionId,
-        materialization.registryKey(),
-        analyzerId,
-        profile,
-        values
-      );
+      activateTransport(protocol, connectionId, materialization.registryKey(), analyzerId, profile, values);
     } catch (RuntimeException exception) {
       registry.unregister(materialization.registryKey(), analyzerId);
       throw exception;
@@ -200,15 +188,12 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
       return;
     }
 
-    throw new AnalyzerConnectionException("Runtime activation is not implemented for the saved " + protocol + " transport");
+    throw new AnalyzerConnectionException(
+      "Runtime activation is not implemented for the saved " + protocol + " transport"
+    );
   }
 
-  private void deactivateTransport(
-    String protocol,
-    String connectionId,
-    String analyzerId,
-    ObjectNode values
-  ) {
+  private void deactivateTransport(String protocol, String connectionId, String analyzerId, ObjectNode values) {
     if ("FILE".equals(protocol)) {
       if (fileWatcher != null) {
         Path directory = Path.of(requiredText(values, "directory", "FILE directory")).normalize();
@@ -231,13 +216,7 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     if ("FILE".equals(protocol)) {
       return Path.of(requiredText(values, "directory", "FILE directory")).normalize() + "#" + connectionId;
     }
-    if (
-      "RS-232".equals(nullableText(values, "transport")) ||
-      "SERVER".equals(nullableText(values, "connectionRole"))
-    ) {
-      return "connection:" + connectionId;
-    }
-    return requiredText(values, "host", "Analyzer host");
+    return "connection:" + connectionId;
   }
 
   private static int requiredPort(JsonNode values, String field) {
@@ -248,16 +227,14 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     return value.asInt();
   }
 
-  private AnalyzerEntry materialize(
-    String analyzerId,
-    ObjectNode connection,
-    ObjectNode profile,
-    ObjectNode values
-  ) {
+  private AnalyzerEntry materialize(String analyzerId, ObjectNode connection, ObjectNode profile, ObjectNode values) {
     AnalyzerEntry entry = new AnalyzerEntry();
     entry.setId(analyzerId);
     entry.setName(requiredText(connection, "displayName", "Connection name"));
     entry.setExpectedProtocol(requiredText(profile.path("protocol"), "name", "Profile protocol"));
+    if ("TCP/IP".equals(nullableText(values, "transport")) && "CLIENT".equals(nullableText(values, "connectionRole"))) {
+      entry.setInboundSourceId(requiredText(values, "host", "Analyzer host"));
+    }
     entry.setIdentifierPattern(nullableText(profile, "identifier_pattern"));
     entry.setFilePattern(nullableText(values, "filePattern"));
     entry.setColumnMappings(textMap(profile.path("column_mapping")));
@@ -289,12 +266,8 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     entry.setMappedTestCodes(mappedCodes);
     entry.setCodeToLoinc(codeToLoinc);
     entry.setScannerSynonyms(scannerSynonyms);
-    entry.setFileTestCode(
-      fileTestCode(entry.getExpectedProtocol(), profile, primaryCodes, entry.getColumnMappings())
-    );
-    entry.setControlResultRecognition(
-      ControlResultRecognition.fromProfile(profile.path("controlResultRecognition"))
-    );
+    entry.setFileTestCode(fileTestCode(entry.getExpectedProtocol(), profile, primaryCodes, entry.getColumnMappings()));
+    entry.setControlResultRecognition(ControlResultRecognition.fromProfile(profile.path("controlResultRecognition")));
     return entry;
   }
 
@@ -314,7 +287,8 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
       return null;
     }
     throw new AnalyzerConnectionException(
-      "FILE profile " + profile.path("profileMeta").path("id").asText() +
+      "FILE profile " +
+      profile.path("profileMeta").path("id").asText() +
       " must declare a row-level testCode column or one primary test mapping"
     );
   }

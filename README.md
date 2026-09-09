@@ -233,9 +233,13 @@ readinessProbe:
 
 ## Security
 
-The `/input` HTTP endpoint and the `/api/profiles` and `/api/analyzers`
+The `/input` HTTP endpoint and the `/api/profiles` and `/api/connections`
 management APIs are protected with HTTP Basic authentication. Non-HTTP
 transports (ASTM/TCP, MLLP, Serial, File) are unaffected.
+
+Active connections have distinct runtime registrations even when they share an
+analyzer host. A host-only inbound lookup is accepted only when it identifies one
+active connection; shared hosts require a connection-specific source binding.
 
 ### Configuration
 

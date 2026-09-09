@@ -58,7 +58,7 @@ public class AnalyzerRuntimeRegistry {
      * @param sourceId the source identifier (IP address, serial port, file path)
      * @return Optional containing the analyzer entry, or empty if no match
      */
-    public Optional<AnalyzerEntry> findAnalyzerEntry(String sourceId) {
+    public synchronized Optional<AnalyzerEntry> findAnalyzerEntry(String sourceId) {
         if (sourceId == null || analyzers.isEmpty()) {
             return Optional.empty();
         }
@@ -70,7 +70,16 @@ public class AnalyzerRuntimeRegistry {
             return Optional.of(entry);
         }
 
-        // Strategy 2: Pattern match (file paths with wildcards)
+        // Host aliases are usable only when exactly one durable connection claims them.
+        List<AnalyzerEntry> aliases = analyzers.values().stream()
+            .filter(candidate -> sourceId.equals(candidate.getInboundSourceId()))
+            .limit(2)
+            .toList();
+        if (!aliases.isEmpty()) {
+            return aliases.size() == 1 ? Optional.of(aliases.get(0)) : Optional.empty();
+        }
+
+        // Pattern match (file paths with wildcards)
         for (Map.Entry<String, AnalyzerEntry> e : analyzers.entrySet()) {
             String pattern = e.getKey();
             if (pattern.contains("*") && matchesGlob(sourceId, pattern)) {
@@ -120,8 +129,8 @@ public class AnalyzerRuntimeRegistry {
     }
 
     /**
-     * Registers an analyzer by source identifier.
-     * If an entry already exists for the sourceId, it is replaced.
+     * Registers a projection under its connection-specific source binding.
+     * Replacing this binding must not replace another connection on the same host.
      *
      * @param sourceId the source identifier (IP address, serial port, glob pattern)
      * @param entry    the analyzer entry to register
@@ -166,6 +175,9 @@ public class AnalyzerRuntimeRegistry {
          * Human-readable analyzer name (e.g., "Mindray BC-5380")
          */
         private String name;
+
+        /** Optional host alias; never used as the durable connection's registry key. */
+        private String inboundSourceId;
 
         /**
          * Expected protocol (ASTM, HL7, CSV) for validation

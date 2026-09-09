@@ -93,11 +93,7 @@ class BridgeAnalyzerConnectionRuntimeTest {
     runtime.activate(replacement, profile);
 
     verify(watcher).removeWatchRegistration(originalDirectory, "oe-42");
-    verify(watcher).addWatchDirectory(
-      replacementDirectory,
-      "*.{ods,ODS,xlsx,XLSX,xls,XLS}",
-      "oe-42"
-    );
+    verify(watcher).addWatchDirectory(replacementDirectory, "*.{ods,ODS,xlsx,XLSX,xls,XLS}", "oe-42");
     assertThat(registry.getRegisteredAnalyzers()).hasSize(1);
   }
 
@@ -131,13 +127,10 @@ class BridgeAnalyzerConnectionRuntimeTest {
       .isInstanceOf(AnalyzerConnectionException.class)
       .hasMessage("replacement unavailable");
     verify(watcher).removeWatchRegistration(originalDirectory, "oe-42");
-    verify(watcher, times(2)).addWatchDirectory(
-      originalDirectory,
-      "*.{ods,ODS,xlsx,XLSX,xls,XLS}",
-      "oe-42"
+    verify(watcher, times(2)).addWatchDirectory(originalDirectory, "*.{ods,ODS,xlsx,XLSX,xls,XLS}", "oe-42");
+    assertThat(registry.getRegisteredAnalyzers()).containsOnlyKeys(
+      originalDirectory + "#00000000-0000-0000-0000-000000000042"
     );
-    assertThat(registry.getRegisteredAnalyzers())
-      .containsOnlyKeys(originalDirectory + "#00000000-0000-0000-0000-000000000042");
   }
 
   @Test
@@ -155,8 +148,7 @@ class BridgeAnalyzerConnectionRuntimeTest {
       BridgeAnalyzerConnectionRuntimeTest.class.getResourceAsStream("/analyzer-profiles/genexpert-astm.json")
     );
     ObjectNode connection = baseConnection(profile, "GeneXpert bench 1");
-    connection.withObject("values")
-      .setAll((ObjectNode) profile.path("configDefaults").deepCopy());
+    connection.withObject("values").setAll((ObjectNode) profile.path("configDefaults").deepCopy());
     connection.withObject("values").put("port", 9_101);
 
     runtime.activate(connection, profile);
@@ -210,23 +202,9 @@ class BridgeAnalyzerConnectionRuntimeTest {
       "connection:00000000-0000-0000-0000-000000000042",
       "oe-42",
       "/dev/ttyUSB7",
-      new SerialConnectionSettings(
-        "ASTM",
-        9600,
-        8,
-        1,
-        "NONE",
-        "NONE",
-        1000,
-        30000,
-        5000,
-        -1,
-        true,
-        true
-      )
+      new SerialConnectionSettings("ASTM", 9600, 8, 1, "NONE", "NONE", 1000, 30000, 5000, -1, true, true)
     );
-    assertThat(registry.findAnalyzerId("connection:00000000-0000-0000-0000-000000000042"))
-      .contains("oe-42");
+    assertThat(registry.findAnalyzerId("connection:00000000-0000-0000-0000-000000000042")).contains("oe-42");
     verifyNoInteractions(astmListeners);
 
     runtime.deactivate(connection, profile);
@@ -276,6 +254,85 @@ class BridgeAnalyzerConnectionRuntimeTest {
     values.put("fileFormat", "XLSX");
     values.put("hasHeader", true);
     values.put("sheetIndex", 0);
+    return connection;
+  }
+
+  @Test
+  void sameHostClientsRemainIndependentThroughRestoreReplacementAndDeactivation() throws Exception {
+    AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
+    AstmConnectionListeners listeners = mock(AstmConnectionListeners.class);
+    BridgeAnalyzerConnectionRuntime runtime = new BridgeAnalyzerConnectionRuntime(
+      registry,
+      null,
+      listeners,
+      mock(SerialConnectionListeners.class)
+    );
+    ObjectNode profile = (ObjectNode) objectMapper.readTree(
+      getClass().getResourceAsStream("/analyzer-profiles/genexpert-astm.json")
+    );
+    ObjectNode first = clientConnection(profile, "connection-a", "oe-a", 9101);
+    ObjectNode second = clientConnection(profile, "connection-b", "oe-b", 9102);
+
+    runtime.activate(first, profile);
+    assertThat(registry.findAnalyzerId("192.0.2.10")).contains("oe-a");
+    runtime.restore(second, profile);
+    assertThat(registry.getRegisteredAnalyzers()).hasSize(2);
+    assertThat(registry.findAnalyzerId("connection:connection-a")).contains("oe-a");
+    assertThat(registry.findAnalyzerId("connection:connection-b")).contains("oe-b");
+    assertThat(registry.findAnalyzerId("192.0.2.10")).isEmpty();
+
+    ObjectNode replacement = first.deepCopy();
+    replacement.withObject("values").put("port", 9103);
+    runtime.activate(replacement, profile);
+    assertThat(registry.getRegisteredAnalyzers()).hasSize(2);
+    assertThat(registry.findAnalyzerId("connection:connection-b")).contains("oe-b");
+
+    runtime.deactivate(replacement, profile);
+    assertThat(registry.findAnalyzerId("connection:connection-a")).isEmpty();
+    assertThat(registry.findAnalyzerId("192.0.2.10")).contains("oe-b");
+    runtime.deactivate(second, profile);
+    assertThat(registry.getRegisteredAnalyzers()).isEmpty();
+    verifyNoInteractions(listeners);
+  }
+
+  @Test
+  void failedReplacementRestoresOneClientWithoutRemovingAnotherOnTheSameHost() throws Exception {
+    AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
+    AstmConnectionListeners listeners = mock(AstmConnectionListeners.class);
+    BridgeAnalyzerConnectionRuntime runtime = new BridgeAnalyzerConnectionRuntime(
+      registry,
+      null,
+      listeners,
+      mock(SerialConnectionListeners.class)
+    );
+    ObjectNode profile = (ObjectNode) objectMapper.readTree(
+      getClass().getResourceAsStream("/analyzer-profiles/genexpert-astm.json")
+    );
+    ObjectNode first = clientConnection(profile, "connection-a", "oe-a", 9101);
+    ObjectNode second = clientConnection(profile, "connection-b", "oe-b", 9102);
+    runtime.activate(first, profile);
+    runtime.activate(second, profile);
+
+    ObjectNode replacement = first.deepCopy();
+    replacement.withObject("values").put("connectionRole", "SERVER");
+    doThrow(new AnalyzerConnectionException("occupied"))
+      .when(listeners)
+      .start("connection-a", "connection:connection-a", "oe-a", 9101, "LIS01_A");
+    assertThatThrownBy(() -> runtime.activate(replacement, profile))
+      .isInstanceOf(AnalyzerConnectionException.class)
+      .hasMessage("occupied");
+
+    assertThat(registry.getRegisteredAnalyzers()).hasSize(2);
+    assertThat(registry.findAnalyzerId("connection:connection-a")).contains("oe-a");
+    assertThat(registry.findAnalyzerId("connection:connection-b")).contains("oe-b");
+    assertThat(registry.findAnalyzerId("192.0.2.10")).isEmpty();
+  }
+
+  private ObjectNode clientConnection(ObjectNode profile, String connectionId, String analyzerId, int port) {
+    ObjectNode connection = baseConnection(profile, "Client bench " + analyzerId);
+    connection.put("connectionId", connectionId).put("clientAnalyzerId", analyzerId);
+    connection.withObject("values").setAll((ObjectNode) profile.path("configDefaults").deepCopy());
+    connection.withObject("values").put("connectionRole", "CLIENT").put("host", "192.0.2.10").put("port", port);
     return connection;
   }
 
