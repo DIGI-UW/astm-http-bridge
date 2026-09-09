@@ -11,6 +11,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import org.apache.commons.io.monitor.FileAlterationMonitor;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry;
 import org.itech.ahb.connection.AnalyzerRuntimeRegistry.AnalyzerEntry;
 import org.itech.ahb.fhir.FileNameSelfDeclarationScanner;
@@ -30,6 +31,121 @@ class FileUploadConcurrencyTest {
   Path directory;
 
   private static final String ANALYZER = "connection-owner";
+
+  @Test
+  void shutdownDrainsUploadsAndRejectsNewFilesBeforeReturning() throws Exception {
+    SqliteFileStateStore store = new SqliteFileStateStore(directory.resolve("state.db"));
+    FileMessageHandler handler = mock(FileMessageHandler.class);
+    FileWatcher watcher = watcher(handler, store);
+    FileUploadController controller = controller(watcher, handler);
+    CountDownLatch processing = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    CountDownLatch stopping = new CountDownLatch(1);
+    FileAlterationMonitor monitor = mock(FileAlterationMonitor.class);
+    doAnswer(invocation -> {
+      stopping.countDown();
+      return null;
+    })
+      .when(monitor)
+      .stop();
+    ReflectionTestUtils.setField(watcher, "monitor", monitor);
+    var executor = Executors.newFixedThreadPool(2);
+    try {
+      doAnswer(invocation -> {
+        processing.countDown();
+        assertTrue(release.await(5, TimeUnit.SECONDS), "upload was not released");
+        return null;
+      })
+        .when(handler)
+        .processFile(any(), eq(ANALYZER), eq("RESULT"), any());
+      var upload = executor.submit(
+        () -> controller.uploadFile(ANALYZER, "RESULT", multipart("original"), new MockHttpServletResponse())
+      );
+      assertTrue(processing.await(5, TimeUnit.SECONDS));
+      var shutdown = executor.submit(watcher::stop);
+      assertTrue(stopping.await(5, TimeUnit.SECONDS));
+      assertThrows(
+        java.util.concurrent.TimeoutException.class,
+        () -> shutdown.get(200, TimeUnit.MILLISECONDS),
+        "shutdown must wait for caller-thread uploads, not only its own executors"
+      );
+      MockHttpServletResponse rejected = new MockHttpServletResponse();
+      controller.uploadFile(
+        ANALYZER,
+        "RESULT",
+        new MockMultipartFile("file", "new.csv", "text/csv", new byte[] { 1 }),
+        rejected
+      );
+      assertEquals(409, rejected.getStatus());
+      assertFalse(Files.exists(directory.resolve("new.csv")));
+      release.countDown();
+      upload.get(5, TimeUnit.SECONDS);
+      shutdown.get(5, TimeUnit.SECONDS);
+      String hash = ReflectionTestUtils.invokeMethod(watcher, "calculateFileHash", directory.resolve("result.csv"));
+      assertEquals("PROCESSED", store.get(ANALYZER, hash).orElseThrow().status().name());
+      assertNull(watcher.tryClaimFile(directory.resolve("after.csv"), ANALYZER));
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+      assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+      watcher.stop();
+      store.close();
+    }
+  }
+
+  @Test
+  void shutdownCancelsDelayedTasksWithoutLosingDurableRetryState() throws Exception {
+    Path database = directory.resolve("state.db");
+    Path file = directory.resolve("result.csv");
+    Files.writeString(file, "original");
+    SqliteFileStateStore store = new SqliteFileStateStore(database);
+    FileMessageHandler handler = mock(FileMessageHandler.class);
+    FileConfig config = new FileConfig();
+    config.setRetryDelayMs(TimeUnit.MINUTES.toMillis(5));
+    FileWatcher watcher = new FileWatcher(config, handler, store);
+    watcher.addWatchDirectory(directory, "*.csv", ANALYZER);
+    var executor = Executors.newSingleThreadExecutor();
+    String hash;
+    Instant deadline;
+    try {
+      doThrow(new FileMessageHandler.FileProcessingException("receiver unavailable"))
+        .when(handler)
+        .processFile(file, ANALYZER);
+      ReflectionTestUtils.invokeMethod(watcher, "processFileWithRetry", file);
+      hash = ReflectionTestUtils.invokeMethod(watcher, "calculateFileHash", file);
+      var before = store.get(ANALYZER, hash).orElseThrow();
+      assertEquals("RETRYING", before.status().name());
+      deadline = before.nextAttemptAt();
+      assertNotNull(deadline);
+      assertTrue(deadline.isAfter(Instant.now()));
+      var scheduler = (java.util.concurrent.ScheduledThreadPoolExecutor) ReflectionTestUtils.getField(
+        watcher,
+        "stabilityChecker"
+      );
+      assertNotNull(scheduler);
+      assertEquals(1, scheduler.getQueue().size(), "there must be a real pending retry to cancel");
+
+      executor.submit(watcher::stop).get(5, TimeUnit.SECONDS);
+
+      assertTrue(scheduler.isTerminated());
+      assertEquals(deadline, store.get(ANALYZER, hash).orElseThrow().nextAttemptAt());
+      verify(handler, times(1)).processFile(file, ANALYZER);
+    } finally {
+      executor.shutdownNow();
+      assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+      watcher.stop();
+      store.close();
+    }
+    SqliteFileStateStore reopened = new SqliteFileStateStore(database);
+    try {
+      var retry = reopened.get(ANALYZER, hash).orElseThrow();
+      assertEquals("RETRYING", retry.status().name());
+      assertEquals(deadline, retry.nextAttemptAt());
+      assertEquals("original", Files.readString(file));
+    } finally {
+      reopened.close();
+    }
+  }
 
   @Test
   void watcherCannotTakeOverAnUploadEvenAfterItsRetryDelayExpires() throws Exception {

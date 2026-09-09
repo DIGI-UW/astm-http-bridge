@@ -138,6 +138,21 @@ Runtime configuration is read from `configuration.yml` (mounted into container a
 | **Server** | | |
 | `server.port` | HTTP server port | 8443 |
 
+### FILE shutdown and recovery
+
+Stopping the FILE service closes admissions for uploads and watcher work before
+stopping its polling and processing executors. Already-started operations retain
+ownership through their final state write. Shutdown then waits up to 30 seconds
+for remaining claims, including uploads running on request threads. A timeout or
+interruption reports incomplete shutdown; it does not release those claims or
+report successful cancellation. Do not treat this failure as a completed drain.
+
+Pending retry timers are cancelled without clearing their persisted state or
+deadlines. On process restart, restored connections rediscover source files and
+resume according to that state. A stopped watcher instance cannot be restarted
+or accept new registrations; recovery creates a new service instance. Preserve
+both the source directories and the configured state database across restarts.
+
 ### Analyzer Identification
 
 Create a durable Bridge connection from a published profile revision. Activating

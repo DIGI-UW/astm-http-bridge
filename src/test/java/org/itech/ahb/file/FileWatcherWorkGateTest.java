@@ -9,6 +9,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class FileWatcherWorkGateTest {
 
@@ -25,6 +26,42 @@ class FileWatcherWorkGateTest {
 
   @AfterEach
   void tearDown() {
+    watcher.stop();
+  }
+
+  @Test
+  void stoppedWatcherNeverAdmitsNewWorkEvenAfterADirectoryPauseCloses() throws Exception {
+    try (var pause = watcher.pauseDirectory(directory)) {
+      watcher.stop();
+    }
+    try (var claim = watcher.tryClaimFile(directory.resolve("result.csv"), "owner")) {
+      assertNull(claim);
+    }
+  }
+
+  @Test
+  void stoppedWatcherCannotBeReactivatedWithClosedExecutors() {
+    watcher.stop();
+    assertThrows(IOException.class, () -> watcher.start());
+    assertThrows(IOException.class, () -> watcher.addWatchDirectory(directory, "*.csv", "new-owner"));
+  }
+
+  @Test
+  void interruptedShutdownDoesNotPretendTheActiveClaimWasCancelled() throws Exception {
+    try (var worker = watcher.tryClaimFile(directory.resolve("busy.csv"), "owner")) {
+      assertNotNull(worker);
+      try {
+        Thread.currentThread().interrupt();
+        assertThrows(IllegalStateException.class, watcher::stop);
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+      var claims = (java.util.Set<?>) ReflectionTestUtils.getField(watcher, "processingFiles");
+      assertNotNull(claims);
+      assertEquals(1, claims.size(), "an interrupted wait must not release somebody else's work");
+      assertNull(watcher.tryClaimFile(directory.resolve("new.csv"), "owner"));
+    }
     watcher.stop();
   }
 

@@ -89,16 +89,19 @@ public class FileWatcher {
     private final Set<Path> processingFiles = ConcurrentHashMap.newKeySet();
     private final Object processingMonitor = new Object();
     private final Map<Path, Integer> pausedDirectories = new HashMap<>();
+    private final Object shutdownMonitor = new Object();
+    private volatile boolean stopping;
+    private boolean shutdownComplete;
 
     /**
      * Claim a physical file for the entire write/process/state-update operation.
      * Uploads and watcher workers share this gate; a retry timestamp is not a lock.
-     * Returns null when busy, paused, or no matching registration remains active.
+     * Returns null when busy, paused, stopping, or no matching registration remains active.
      */
     public FileProcessingLease tryClaimFile(Path filePath, String expectedAnalyzerId) throws IOException {
         Path canonicalPath = filePath.toFile().getCanonicalFile().toPath();
         synchronized (processingMonitor) {
-            if (pausedDirectories.keySet().stream().anyMatch(canonicalPath::startsWith)) {
+            if (stopping || pausedDirectories.keySet().stream().anyMatch(canonicalPath::startsWith)) {
                 return null;
             }
             String owner = determineAnalyzerId(filePath);
@@ -182,11 +185,11 @@ public class FileWatcher {
 
     private FileAlterationMonitor monitor;
     private ExecutorService processorExecutor;
-    private final ScheduledExecutorService stabilityChecker = Executors.newScheduledThreadPool(1);
+    private final ScheduledThreadPoolExecutor stabilityChecker = new ScheduledThreadPoolExecutor(1);
     /**
      * Durable per-file processing state. Replaces the former in-memory
      * {@code processedFileHashes} / {@code retryTracker} / {@code permanentlySkippedFiles}
-     * sets. Initialized in {@link #start()}; closed in {@link #stop()}.
+     * sets. Injected as a shared bean; Spring owns its closure after dependent services stop.
      */
     private FileStateStore stateStore;
 
@@ -205,6 +208,9 @@ public class FileWatcher {
         // start() bails out on !fileConfig.isEnabled() before touching the
         // store, so null here is safe.
         this.stateStore = stateStore;
+        // Retry deadlines are persisted. Queued retries must not delay shutdown;
+        // already-running work still holds its lease until its state is recorded.
+        stabilityChecker.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
     /**
@@ -212,6 +218,9 @@ public class FileWatcher {
      */
     @PostConstruct
     public synchronized void start() throws IOException {
+        if (stopping) {
+            throw new IOException("Cannot restart a stopped FILE watcher; restore connections in a new service instance");
+        }
         if (running) {
             return;
         }
@@ -265,6 +274,9 @@ public class FileWatcher {
      * in which case it is replaced in-place (glob + observer refreshed).
      */
     public synchronized void addWatchDirectory(Path dirPath, String filePattern, String analyzerId) throws IOException {
+        if (stopping) {
+            throw new IOException("Cannot activate a FILE watch while the service is stopping");
+        }
         Path normalized = dirPath.normalize();
         String effectiveGlob = (filePattern == null || filePattern.isBlank()) ? "*" : filePattern;
         registerDirectoryInternal(normalized, analyzerId, effectiveGlob, true);
@@ -518,28 +530,54 @@ public class FileWatcher {
      */
     @PreDestroy
     public void stop() {
-        log.info("Stopping file watcher service...");
-        running = false;
+        synchronized (shutdownMonitor) {
+            if (shutdownComplete) return;
+            log.info("Stopping file watcher service...");
+            // Coordinate startup/registration, but never hold the outer lock
+            // while waiting for monitor callbacks, processors, or uploads.
+            synchronized (this) {
+                synchronized (processingMonitor) {
+                    stopping = true;
+                    running = false;
+                }
+            }
 
-        // Stop polling monitor
-        if (monitor != null) {
-            try {
-                monitor.stop();
-            } catch (Exception e) {
-                log.error("Error stopping file alteration monitor", e);
+            if (monitor != null) {
+                try {
+                    monitor.stop();
+                } catch (Exception e) {
+                    log.error("Error stopping file alteration monitor", e);
+                }
+            }
+
+            // Stop producers before their processing executor. Queued retries
+            // are durable and will be rediscovered after process restart.
+            shutdownExecutor(stabilityChecker, "stability-checker");
+            shutdownExecutor(processorExecutor, "processor");
+            awaitUploadAndWorkerClaims();
+
+            // The state store is shared; its bean owner closes it, not this service.
+            shutdownComplete = true;
+            log.info("File watcher service stopped");
+        }
+    }
+
+    private void awaitUploadAndWorkerClaims() {
+        synchronized (processingMonitor) {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (!processingFiles.isEmpty()) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    throw new IllegalStateException("FILE shutdown incomplete: timed out draining active work");
+                }
+                try {
+                    TimeUnit.NANOSECONDS.timedWait(processingMonitor, remaining);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("FILE shutdown incomplete: interrupted draining active work", exception);
+                }
             }
         }
-
-        // Shutdown executors gracefully
-        shutdownExecutor(processorExecutor, "processor");
-        shutdownExecutor(stabilityChecker, "stability-checker");
-
-        // State store is a shared @Bean; Spring closes it via
-        // StateStoreConfig#fileStateStore(destroyMethod="close") during
-        // ApplicationContext shutdown. FileWatcher must NOT close it here
-        // because HttpForwardingRouter may still be using it.
-
-        log.info("File watcher service stopped");
     }
 
     /**
@@ -822,9 +860,13 @@ public class FileWatcher {
         long delay = fileConfig.getRetryDelayMs() * (long) Math.pow(2, attempts - 1);
         Instant nextAt = Instant.now().plusMillis(delay);
         stateStore.setNextAttemptAt(analyzerId, fileHash, nextAt);
-        log.info("Scheduling retry for file: {} in {}ms (next_attempt_at={})",
+        log.info("Recorded retry deadline for file: {} in {}ms (next_attempt_at={})",
                 filePath.getFileName(), delay, nextAt);
-        stabilityChecker.schedule(() -> processFileWithRetry(filePath), delay, TimeUnit.MILLISECONDS);
+        synchronized (processingMonitor) {
+            if (!stopping) {
+                stabilityChecker.schedule(() -> processFileWithRetry(filePath), delay, TimeUnit.MILLISECONDS);
+            }
+        }
     }
 
     /**
