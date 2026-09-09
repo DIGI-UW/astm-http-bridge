@@ -244,6 +244,7 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     if ("ASTM".equals(entry.getExpectedProtocol())) {
       entry.setAstmResultRecordSelection(AstmResultRecordSelection.fromProfile(profile.path("configDefaults")));
     } else if ("FILE".equals(entry.getExpectedProtocol())) {
+      entry.setFileDirectory(Path.of(requiredText(values, "directory", "FILE directory")).normalize().toString());
       entry.setTabularFileLayout(tabularFileLayout(profile));
       entry.setTabularResultValueSelection(TabularResultValueSelection.fromProfile(profile));
     }

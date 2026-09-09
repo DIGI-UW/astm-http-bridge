@@ -87,6 +87,98 @@ public class FileWatcher {
      * state store's RETRYING/next_attempt_at fields carry the scheduling forward.
      */
     private final Set<Path> processingFiles = ConcurrentHashMap.newKeySet();
+    private final Object processingMonitor = new Object();
+    private final Map<Path, Integer> pausedDirectories = new HashMap<>();
+
+    /**
+     * Claim a physical file for the entire write/process/state-update operation.
+     * Uploads and watcher workers share this gate; a retry timestamp is not a lock.
+     * Returns null when busy, paused, or no matching registration remains active.
+     */
+    public FileProcessingLease tryClaimFile(Path filePath, String expectedAnalyzerId) throws IOException {
+        Path canonicalPath = filePath.toFile().getCanonicalFile().toPath();
+        synchronized (processingMonitor) {
+            if (pausedDirectories.keySet().stream().anyMatch(canonicalPath::startsWith)) {
+                return null;
+            }
+            String owner = determineAnalyzerId(filePath);
+            if (owner == null || (expectedAnalyzerId != null && !expectedAnalyzerId.equals(owner))) {
+                return null;
+            }
+            return processingFiles.add(canonicalPath) ? new FileProcessingLease(canonicalPath) : null;
+        }
+    }
+
+    /**
+     * Prevent new work and drain existing claims before connection removal or
+     * directory cleanup. Never call while holding the runtime registry lock:
+     * processors may need that registry to complete. A timeout leaves cleanup
+     * unperformed; no worker is assumed cancelled merely because a wait expired.
+     */
+    public DirectoryPause pauseDirectory(Path directory) throws IOException {
+        Path canonicalPath = directory.toFile().getCanonicalFile().toPath();
+        synchronized (processingMonitor) {
+            pausedDirectories.merge(canonicalPath, 1, Integer::sum);
+            DirectoryPause pause = new DirectoryPause(canonicalPath);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            try {
+                while (processingFiles.stream().anyMatch(path -> path.startsWith(canonicalPath))) {
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0) {
+                        throw new IOException("Timed out draining FILE work for " + directory);
+                    }
+                    TimeUnit.NANOSECONDS.timedWait(processingMonitor, remaining);
+                }
+                return pause;
+            } catch (InterruptedException exception) {
+                pause.close();
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted draining FILE work for " + directory, exception);
+            } catch (IOException | RuntimeException exception) {
+                pause.close();
+                throw exception;
+            }
+        }
+    }
+
+    public final class DirectoryPause implements AutoCloseable {
+        private final Path directory;
+        private boolean closed;
+
+        private DirectoryPause(Path directory) {
+            this.directory = directory;
+        }
+
+        @Override
+        public void close() {
+            synchronized (processingMonitor) {
+                if (!closed) {
+                    pausedDirectories.compute(directory, (path, count) -> count == 1 ? null : count - 1);
+                    closed = true;
+                }
+            }
+        }
+    }
+
+    public final class FileProcessingLease implements AutoCloseable {
+        private final Path path;
+        private boolean closed;
+
+        private FileProcessingLease(Path path) {
+            this.path = path;
+        }
+
+        @Override
+        public void close() {
+            synchronized (processingMonitor) {
+                if (!closed) {
+                    processingFiles.remove(path);
+                    closed = true;
+                    processingMonitor.notifyAll();
+                }
+            }
+        }
+    }
 
     private FileAlterationMonitor monitor;
     private ExecutorService processorExecutor;
@@ -187,6 +279,14 @@ public class FileWatcher {
      * others alive, use {@link #removeWatchRegistration(Path, String)}.
      */
     public synchronized boolean removeWatchDirectory(Path dirPath) {
+        try (DirectoryPause pause = pauseDirectory(dirPath)) {
+            return removeWatchDirectoryDrained(dirPath);
+        } catch (IOException exception) {
+            throw new IllegalStateException("Cannot drain FILE directory for removal", exception);
+        }
+    }
+
+    private boolean removeWatchDirectoryDrained(Path dirPath) {
         Path normalized = dirPath.normalize();
         List<WatchRegistration> registrations = registrationsByDirectory.remove(normalized);
         if (registrations == null || registrations.isEmpty()) {
@@ -215,6 +315,14 @@ public class FileWatcher {
      * whole directory).
      */
     public synchronized boolean removeWatchRegistration(Path dirPath, String analyzerId) {
+        try (DirectoryPause pause = pauseDirectory(dirPath)) {
+            return removeWatchRegistrationDrained(dirPath, analyzerId);
+        } catch (IOException exception) {
+            throw new IllegalStateException("Cannot drain FILE registration for removal", exception);
+        }
+    }
+
+    private boolean removeWatchRegistrationDrained(Path dirPath, String analyzerId) {
         Path normalized = dirPath.normalize();
         List<WatchRegistration> registrations = registrationsByDirectory.get(normalized);
         if (registrations == null || registrations.isEmpty()) {
@@ -614,18 +722,15 @@ public class FileWatcher {
      * </ol>
      */
     private void processFileWithRetry(Path filePath) {
-        // In-process lock: prevent two threads in this JVM from processing
-        // the same path concurrently. Persistent retry scheduling is handled
-        // by the state store's next_attempt_at; this set is purely for
-        // intra-JVM races (e.g. rescan vs. scheduled retry firing near-simultaneously).
-        if (!processingFiles.add(filePath)) {
-            log.debug("File already being processed by another thread: {}", filePath.getFileName());
-            return;
-        }
-
         String analyzerId = null;
         String fileHash = null;
+        FileProcessingLease claim = null;
         try {
+            claim = tryClaimFile(filePath, null);
+            if (claim == null) {
+                log.debug("No available active FILE claim for: {}", filePath.getFileName());
+                return;
+            }
             analyzerId = determineAnalyzerId(filePath);
             if (analyzerId == null) {
                 log.warn("Could not determine analyzer for file {}; skipping", filePath);
@@ -681,7 +786,9 @@ public class FileWatcher {
                         filePath, e.getMessage(), e);
             }
         } finally {
-            processingFiles.remove(filePath);
+            if (claim != null) {
+                claim.close();
+            }
             MDC.remove("analyzerId");
             MDC.remove("contentHash");
             MDC.remove("path");

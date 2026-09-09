@@ -53,6 +53,7 @@ class BridgeAnalyzerConnectionRuntimeTest {
       .findFirst()
       .orElseThrow();
     assertThat(entry.getExpectedProtocol()).isEqualTo("FILE");
+    assertThat(entry.getFileDirectory()).isEqualTo(directory.toString());
     assertThat(entry.getColumnMappings())
       .containsEntry("Sample ID", "sampleId")
       .containsEntry("TargetName", "testCode")

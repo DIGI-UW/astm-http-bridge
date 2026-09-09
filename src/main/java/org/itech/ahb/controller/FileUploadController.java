@@ -49,12 +49,8 @@ import org.springframework.web.util.HtmlUtils;
 public class FileUploadController {
 
     /**
-     * How long the pre-register lease claims ownership of the uploaded file
-     * before handing off to FileWatcher's retry loop. Must exceed the typical
-     * upload + processFile wall-clock, and at least one FileWatcher poll
-     * interval (default 5s; see {@code bridge.file.pollIntervalMs}). 60s
-     * gives generous headroom for large files without holding ownership
-     * indefinitely on a stuck upload.
+     * Crash-recovery retry delay. Live ownership belongs to FileWatcher's shared
+     * file claim and cannot expire while the upload is still processing.
      */
     static final long UPLOAD_LEASE_SECONDS = 60;
 
@@ -78,13 +74,14 @@ public class FileUploadController {
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map.Entry<String, AnalyzerEntry> entry : registry.getRegisteredAnalyzers().entrySet()) {
             AnalyzerEntry a = entry.getValue();
-            if (!"FILE".equalsIgnoreCase(a.getExpectedProtocol())) {
+            if (!"FILE".equalsIgnoreCase(a.getExpectedProtocol())
+                    || a.getFileDirectory() == null || a.getFileDirectory().isBlank()) {
                 continue;
             }
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", a.getId());
             m.put("name", a.getName() != null ? a.getName() : a.getId());
-            m.put("watchDirectory", entry.getKey());
+            m.put("watchDirectory", a.getFileDirectory());
             m.put("filePattern", a.getFilePattern() != null ? a.getFilePattern() : "*");
             result.add(m);
         }
@@ -168,17 +165,10 @@ public class FileUploadController {
             return;
         }
 
-        String watchDir = null;
-        for (Map.Entry<String, AnalyzerEntry> rentry : registry.getRegisteredAnalyzers().entrySet()) {
-            if (analyzerId.equals(rentry.getValue().getId())
-                    && "FILE".equalsIgnoreCase(rentry.getValue().getExpectedProtocol())) {
-                watchDir = rentry.getKey();
-                break;
-            }
-        }
-        if (watchDir == null) {
-            writeErrorHtml(response, HttpStatus.INTERNAL_SERVER_ERROR,
-                    "Could not resolve watch directory for analyzer " + analyzerId);
+        String watchDir = entry.getFileDirectory();
+        if (watchDir == null || watchDir.isBlank()) {
+            writeErrorHtml(response, HttpStatus.CONFLICT,
+                    "Analyzer has no active FILE watch directory: " + analyzerId);
             return;
         }
 
@@ -196,13 +186,27 @@ public class FileUploadController {
             return;
         }
 
-        // Pre-register the file as RETRYING with a short future lease
-        // (next_attempt_at = now + UPLOAD_LEASE_SECONDS). This claims ownership
-        // so FileWatcher's polling loop skips it during the upload (RETRYING
-        // rows with a future next_attempt_at are skipped per FileWatcher's
-        // existing backoff logic). On success we transition to PROCESSED below;
-        // on processFile failure we clear the lease to hand the file off to
-        // FileWatcher's normal retry machinery.
+        try (FileWatcher.FileProcessingLease claim = fileWatcher.tryClaimFile(targetFile, analyzerId)) {
+            if (claim == null) {
+                writeErrorHtml(response, HttpStatus.CONFLICT,
+                        "File is busy or its FILE connection is no longer accepting uploads: " + originalFilename);
+                return;
+            }
+            processUpload(analyzerId, testCode, entry, originalFilename, targetDir, targetFile,
+                    fileBytes, contentHash, response);
+        } catch (IOException e) {
+            writeErrorHtml(response, HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Could not claim upload file: " + e.getMessage());
+        }
+    }
+
+    private void processUpload(String analyzerId, String testCode, AnalyzerEntry entry,
+            String originalFilename, Path targetDir, Path targetFile, byte[] fileBytes,
+            String contentHash, jakarta.servlet.http.HttpServletResponse response) {
+        // Record RETRYING before writing. The shared file claim protects the
+        // entire operation, including failure handling and final state writes.
+        // The bounded retry delay lets a restarted process recover an upload
+        // interrupted by a crash; it does not grant ownership to a live worker.
         //
         // Previously this marked PROCESSED immediately. That was a silent
         // data-loss bug: a processFile failure left the row stuck PROCESSED,

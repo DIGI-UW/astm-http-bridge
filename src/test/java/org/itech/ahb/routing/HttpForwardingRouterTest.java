@@ -195,12 +195,12 @@ class HttpForwardingRouterTest {
                 "MSH|^~\\&|SENDER|LAB|LIS|LAB|20260909000000||ORU^R01|1|P|2.5.1",
                 "not a result", "", null}) {
             String source = "source-" + expectedCount;
-            AnalyzerRegistryConfig registry = new AnalyzerRegistryConfig();
+            AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
             AnalyzerEntry entry = new AnalyzerEntry();
             entry.setId("analyzer-1");
             entry.setExpectedProtocol("HL7");
             entry.setControlResultRecognition(ControlResultRecognition.none());
-            registry.setAnalyzers(Map.of(source, entry));
+            registry.register(source, entry);
             HttpForwardingRouter router = new HttpForwardingRouter(
                     minimalConfig(), fhirConfig, stateStore, registry);
             MessageEnvelope message = MessageEnvelope.builder()

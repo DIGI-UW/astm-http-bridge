@@ -189,6 +189,9 @@ public class AnalyzerRuntimeRegistry {
          */
         private String filePattern;
 
+        /** Actual directory materialized from saved connection values, never a registry key. */
+        private String fileDirectory;
+
         /**
          * Profile-owned expression used to identify an inbound sender (HL7 MSH-3/4,
          * ASTM H-record).
