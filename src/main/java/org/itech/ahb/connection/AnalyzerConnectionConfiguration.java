@@ -3,9 +3,9 @@ package org.itech.ahb.connection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Path;
 import java.time.Clock;
-import org.itech.ahb.profile.AnalyzerProfileCatalog;
 import org.itech.ahb.connectivity.ConnectionProbeExecutor;
 import org.itech.ahb.file.FileWatcher;
+import org.itech.ahb.profile.AnalyzerProfileCatalog;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -38,13 +38,15 @@ public class AnalyzerConnectionConfiguration {
     AnalyzerRuntimeRegistry registry,
     ObjectProvider<FileWatcher> fileWatcher,
     AstmConnectionListeners astmConnectionListeners,
-    SerialConnectionListeners serialConnectionListeners
+    SerialConnectionListeners serialConnectionListeners,
+    Hl7ConnectionListeners hl7ConnectionListeners
   ) {
     return new BridgeAnalyzerConnectionRuntime(
       registry,
       fileWatcher.getIfAvailable(),
       astmConnectionListeners,
-      serialConnectionListeners
+      serialConnectionListeners,
+      hl7ConnectionListeners
     );
   }
 

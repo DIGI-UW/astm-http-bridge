@@ -76,7 +76,7 @@ java -jar target/openelis-analyzer-bridge-*.jar --spring.config.location=configu
 | 8442 | 8443 | HTTPS API endpoint |
 | 12000 | 12001 | ASTM LIS1-A listener |
 | 12010 | 12011 | ASTM E1381-95 listener |
-| 2575 | 2575 | MLLP HL7 listener |
+| Saved port | Saved port | Active HL7 server connection (publish each configured port) |
 
 ### Volume Mounts
 
@@ -114,8 +114,7 @@ Runtime configuration is read from `configuration.yml` (mounted into container a
 | `org.itech.ahb.forward-http-server.backoff-ms` | Initial outbound retry backoff in ms | 1000 |
 | **ASTM TCP** | | |
 | **MLLP (HL7)** | | |
-| `org.itech.ahb.mllp.enabled` | Enable MLLP listener | false |
-| `org.itech.ahb.mllp.port` | MLLP listen port | 2575 |
+| `org.itech.ahb.mllp.enabled` | Permit saved HL7 server connections to start listeners | false |
 | **Serial** | | |
 | **File Watcher** | | |
 | `bridge.file.enabled` | Enable FILE connection runtime | true |
@@ -137,6 +136,28 @@ Runtime configuration is read from `configuration.yml` (mounted into container a
 | `bridge.security.password` | HTTP Basic password: plaintext or `{bcrypt}...` (use env var in prod) | changeme |
 | **Server** | | |
 | `server.port` | HTTP server port | 8443 |
+
+### Saved HL7 listeners
+
+Enable `org.itech.ahb.mllp.enabled` (or `MLLP_ENABLED` with the production profile)
+to permit activation of saved HL7 connections with `transport=TCP/IP` and
+`connectionRole=SERVER`. Each connection owns its saved `port`; publish those
+ports in the container configuration. Enabling the runtime alone opens no port.
+The former global `org.itech.ahb.mllp.port` / `MLLP_PORT` setting no longer creates
+a listener. TCP client-mode inbound activation is not supported and is rejected.
+
+Activation succeeds only after that connection's socket binds. The listener's
+saved connection binding identifies incoming results; neither the peer IP nor
+MSH sender fields can select another analyzer. Use network access controls to
+restrict who can reach each analyzer port; the binding is not peer authentication.
+Deactivation closes admissions and waits up to 30 seconds for active delivery
+before removing routing authority. Failed drains report failure and retain
+ownership. On restart, the durable connection catalog restores active listeners
+from their last successfully activated values and pinned profiles, even when a
+newer saved edit has not been activated. These values remain internal to Bridge;
+OpenELIS receives the active reference, not a second configuration copy.
+Health reports each owned listener,
+not a global socket.
 
 ### FILE shutdown and recovery
 
@@ -338,6 +359,16 @@ mvn verify
 ```
 
 ### Docker E2E Tests
+
+These scripts require saved, active test connections; enabling a transport alone
+does not register an analyzer. For the HL7 script, first activate an HL7 server
+connection, then set `BRIDGE_CONNECTION_ID` and its `BRIDGE_MLLP_PORT`. Set
+`BRIDGE_PASSWORD` (and optionally `BRIDGE_USERNAME`) when API authentication is
+enabled. Its forwarding destination must be the isolated test WireMock service.
+The script verifies both the protocol acknowledgement and saved connection identity.
+
+For self-contained HL7 lifecycle and disk-backed restart checks without preparing
+a deployment, run `mvn test -Dtest=Hl7SavedConnectionTest,HapiConnectionLifecycleTest`.
 
 ```bash
 # Run full E2E suite (ASTM TCP, MLLP, File, HTTP)

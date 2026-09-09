@@ -15,14 +15,15 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
+import org.itech.ahb.connection.AnalyzerConnectionException.Kind;
 import org.itech.ahb.profile.AnalyzerProfileCatalog;
 import org.itech.ahb.profile.ProfileFingerprintService;
-import org.itech.ahb.connection.AnalyzerConnectionException.Kind;
 
 /** Durable, profile-pinned analyzer connections owned by Bridge. */
 public final class AnalyzerConnectionCatalog {
@@ -89,8 +90,10 @@ public final class AnalyzerConnectionCatalog {
     String existingId = connectionIdByClientAnalyzerId.get(clientAnalyzerId);
     if (existingId != null) {
       ObjectNode existing = connections.get(existingId);
-      if (requestId.equals(existing.path("createRequestId").asText()) ||
-          sameConfiguration(existing, profileRef, displayName, effectiveValues(profile, suppliedValues))) {
+      if (
+        requestId.equals(existing.path("createRequestId").asText()) ||
+        sameConfiguration(existing, profileRef, displayName, effectiveValues(profile, suppliedValues))
+      ) {
         return view(existing, profile);
       }
       throw new AnalyzerConnectionException(
@@ -132,8 +135,10 @@ public final class AnalyzerConnectionCatalog {
     if (existing.path("configRevision").asInt() != expectedRevision) {
       throw new AnalyzerConnectionException(
         Kind.CONFLICT,
-        "Expected configuration revision " + expectedRevision +
-        " does not match current revision " + existing.path("configRevision").asInt()
+        "Expected configuration revision " +
+        expectedRevision +
+        " does not match current revision " +
+        existing.path("configRevision").asInt()
       );
     }
 
@@ -145,6 +150,14 @@ public final class AnalyzerConnectionCatalog {
     ObjectNode values = effectiveValues(profile, suppliedValues, (ObjectNode) existing.path("values"));
 
     ObjectNode changed = existing.deepCopy();
+    // Preserve active values before editing records written before snapshots existed.
+    if (
+      "ACTIVE".equals(existing.path("actualRuntimeState").asText()) &&
+      !existing.path("activeRuntimeConfiguration").isObject() &&
+      activeRuntimeMatchesConfiguration(existing)
+    ) {
+      changed.set("activeRuntimeConfiguration", runtimeConfiguration(existing));
+    }
     changed.put("displayName", displayName);
     changed.set("profileRef", profileRef.deepCopy());
     changed.put("configRevision", expectedRevision + 1);
@@ -171,8 +184,10 @@ public final class AnalyzerConnectionCatalog {
     if (record.path("configRevision").asInt() != expectedRevision) {
       throw new AnalyzerConnectionException(
         Kind.CONFLICT,
-        "Expected configuration revision " + expectedRevision +
-        " does not match current revision " + record.path("configRevision").asInt()
+        "Expected configuration revision " +
+        expectedRevision +
+        " does not match current revision " +
+        record.path("configRevision").asInt()
       );
     }
 
@@ -204,8 +219,10 @@ public final class AnalyzerConnectionCatalog {
     if (record.path("configRevision").asInt() != expectedRevision) {
       throw new AnalyzerConnectionException(
         Kind.CONFLICT,
-        "Expected configuration revision " + expectedRevision +
-        " does not match current revision " + record.path("configRevision").asInt()
+        "Expected configuration revision " +
+        expectedRevision +
+        " does not match current revision " +
+        record.path("configRevision").asInt()
       );
     }
     ObjectNode acknowledgements = record.withObject("runtimeCommandAcks");
@@ -253,6 +270,7 @@ public final class AnalyzerConnectionCatalog {
     active.put("configFingerprint", record.path("configFingerprint").asText());
     active.put("runtimeRevision", runtimeRevision);
     active.put("runtimeFingerprint", runtimeFingerprint);
+    record.set("activeRuntimeConfiguration", runtimeConfiguration(record));
     record.put("updatedAt", clock.instant().toString());
     return runtimeAcknowledgement(record, commandId, "ACTIVATE", "APPLIED");
   }
@@ -270,16 +288,12 @@ public final class AnalyzerConnectionCatalog {
     record.put("runtimeRevision", runtimeRevision);
     record.put("runtimeFingerprint", runtimeFingerprint);
     record.putNull("activeRuntimeRef");
+    record.remove("activeRuntimeConfiguration");
     record.put("updatedAt", clock.instant().toString());
     return runtimeAcknowledgement(record, commandId, "DEACTIVATE", "APPLIED");
   }
 
-  private ObjectNode runtimeAcknowledgement(
-    ObjectNode record,
-    String commandId,
-    String action,
-    String outcome
-  ) {
+  private ObjectNode runtimeAcknowledgement(ObjectNode record, String commandId, String action, String outcome) {
     ObjectNode acknowledgement = objectMapper.createObjectNode();
     acknowledgement.put("schemaVersion", SCHEMA_VERSION);
     acknowledgement.put("commandId", commandId);
@@ -300,10 +314,12 @@ public final class AnalyzerConnectionCatalog {
 
   private boolean activeRuntimeMatchesConfiguration(ObjectNode record) {
     JsonNode active = record.path("activeRuntimeRef");
-    return active.isObject() &&
-    active.path("profileRef").equals(record.path("profileRef")) &&
-    active.path("configRevision").asInt() == record.path("configRevision").asInt() &&
-    active.path("configFingerprint").asText().equals(record.path("configFingerprint").asText());
+    return (
+      active.isObject() &&
+      active.path("profileRef").equals(record.path("profileRef")) &&
+      active.path("configRevision").asInt() == record.path("configRevision").asInt() &&
+      active.path("configFingerprint").asText().equals(record.path("configFingerprint").asText())
+    );
   }
 
   private String runtimeFingerprint(ObjectNode record, String state, int runtimeRevision) {
@@ -318,13 +334,37 @@ public final class AnalyzerConnectionCatalog {
   }
 
   private void restoreActiveConnections() {
-    connections.values().stream()
+    connections
+      .values()
+      .stream()
       .filter(record -> "ACTIVE".equals(record.path("actualRuntimeState").asText()))
       .sorted(Comparator.comparing(record -> record.path("connectionId").asText()))
       .forEach(record -> {
-        ObjectNode profile = requirePinnedProfile((ObjectNode) record.path("profileRef"));
-        runtime.restore(record.deepCopy(), profile.deepCopy());
+        ObjectNode restored = record.deepCopy();
+        JsonNode configuration = record.path("activeRuntimeConfiguration");
+        if (configuration.isObject() && record.path("activeRuntimeRef").isObject()) {
+          restored.set("values", configuration.path("values").deepCopy());
+          restored.set("displayName", configuration.path("displayName").deepCopy());
+          ObjectNode active = (ObjectNode) record.path("activeRuntimeRef");
+          for (String key : List.of("profileRef", "configRevision", "configFingerprint")) {
+            restored.set(key, active.path(key).deepCopy());
+          }
+        } else if (!activeRuntimeMatchesConfiguration(record)) {
+          throw new AnalyzerConnectionException(
+            "Cannot restore active connection without its activated configuration: " +
+            record.path("connectionId").asText()
+          );
+        }
+        ObjectNode profile = requirePinnedProfile((ObjectNode) restored.path("profileRef"));
+        runtime.restore(restored, profile.deepCopy());
       });
+  }
+
+  private ObjectNode runtimeConfiguration(ObjectNode record) {
+    ObjectNode configuration = objectMapper.createObjectNode();
+    configuration.set("values", record.path("values").deepCopy());
+    configuration.set("displayName", record.path("displayName").deepCopy());
+    return configuration;
   }
 
   private ObjectNode requireRecord(String connectionId) {
@@ -356,11 +396,7 @@ public final class AnalyzerConnectionCatalog {
     return effectiveValues(profile, suppliedValues, null);
   }
 
-  private ObjectNode effectiveValues(
-    ObjectNode profile,
-    ObjectNode suppliedValues,
-    ObjectNode existingValues
-  ) {
+  private ObjectNode effectiveValues(ObjectNode profile, ObjectNode suppliedValues, ObjectNode existingValues) {
     ObjectNode values = profileDefaults(profile);
     if (existingValues != null) {
       for (JsonNode descriptor : profile.path("connectionFields")) {
@@ -383,15 +419,12 @@ public final class AnalyzerConnectionCatalog {
     return values;
   }
 
-  private boolean sameConfiguration(
-    ObjectNode record,
-    ObjectNode profileRef,
-    String displayName,
-    ObjectNode values
-  ) {
-    return record.path("profileRef").equals(profileRef) &&
-    displayName.equals(record.path("displayName").asText()) &&
-    record.path("values").equals(values);
+  private boolean sameConfiguration(ObjectNode record, ObjectNode profileRef, String displayName, ObjectNode values) {
+    return (
+      record.path("profileRef").equals(profileRef) &&
+      displayName.equals(record.path("displayName").asText()) &&
+      record.path("values").equals(values)
+    );
   }
 
   private String configurationFingerprint(ObjectNode profileRef, String displayName, ObjectNode values) {
@@ -493,11 +526,7 @@ public final class AnalyzerConnectionCatalog {
     return !value.isMissingNode() && !value.isNull() && (!value.isTextual() || !value.asText().isBlank());
   }
 
-  private static boolean isVisible(
-    JsonNode descriptor,
-    ObjectNode values,
-    Map<String, JsonNode> descriptors
-  ) {
+  private static boolean isVisible(JsonNode descriptor, ObjectNode values, Map<String, JsonNode> descriptors) {
     return isVisible(descriptor, values, descriptors, new HashSet<>());
   }
 
@@ -518,10 +547,7 @@ public final class AnalyzerConnectionCatalog {
       }
       String controllingKey = condition.path("fieldKey").asText();
       JsonNode controllingField = descriptors.get(controllingKey);
-      if (
-        controllingField != null &&
-        !isVisible(controllingField, values, descriptors, visiting)
-      ) {
+      if (controllingField != null && !isVisible(controllingField, values, descriptors, visiting)) {
         return false;
       }
       JsonNode actual = values.path(controllingKey);
@@ -573,12 +599,13 @@ public final class AnalyzerConnectionCatalog {
   }
 
   private static void validateValueType(String key, JsonNode descriptor, JsonNode value) {
-    boolean correctType = switch (descriptor.path("inputKind").asText()) {
-      case "NUMBER" -> value.isNumber();
-      case "BOOLEAN" -> value.isBoolean();
-      case "TEXT", "SECRET", "FILE_PATH", "SELECT" -> value.isTextual();
-      default -> false;
-    };
+    boolean correctType =
+      switch (descriptor.path("inputKind").asText()) {
+        case "NUMBER" -> value.isNumber();
+        case "BOOLEAN" -> value.isBoolean();
+        case "TEXT", "SECRET", "FILE_PATH", "SELECT" -> value.isTextual();
+        default -> false;
+      };
     if (!correctType) {
       throw new AnalyzerConnectionException("Connection value has the wrong type for " + key);
     }

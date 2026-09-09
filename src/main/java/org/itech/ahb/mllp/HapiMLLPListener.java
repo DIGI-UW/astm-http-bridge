@@ -1,165 +1,153 @@
 package org.itech.ahb.mllp;
 
+import ca.uhn.hl7v2.DefaultHapiContext;
 import ca.uhn.hl7v2.app.SimpleServer;
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
+import ca.uhn.hl7v2.util.StandardSocketFactory;
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketAddress;
+import java.net.SocketTimeoutException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import lombok.extern.slf4j.Slf4j;
 import org.itech.ahb.routing.MessageRouter;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.stereotype.Component;
 
-/**
- * Spring-managed HAPI MLLP listener for receiving HL7 v2.x messages.
- * <p>
- * Replaces the custom MLLPServer/MLLPServerRunner/MLLPServerTrigger with
- * HAPI's production-grade {@link SimpleServer}, aligning with the
- * Universal Bridge architecture (M2a).
- * </p>
- * <p>
- * Message flow:
- * <pre>
- * Analyzer → HAPI SimpleServer (MLLP framing)
- *   → RateLimitingReceivingApplication (security)
- *     → HapiReceivingApplication (routing)
- *       → MessageEnvelope → MessageRouter → HTTP endpoint
- * </pre>
- * </p>
- * <p>
- * HAPI SimpleServer provides:
- * <ul>
- *   <li>RFC 3863 compliant MLLP framing (VT/FS/CR delimiters)</li>
- *   <li>Properly-formed HL7 ACK/NAK responses with all required MSH fields</li>
- *   <li>Safe MSH segment parsing</li>
- *   <li>Built-in connection and thread management</li>
- * </ul>
- * </p>
- *
- * @see HapiReceivingApplication
- * @see RateLimitingReceivingApplication
- * @see MessageRouter
- */
-@Component
-@ConditionalOnProperty(name = "org.itech.ahb.mllp.enabled", havingValue = "true", matchIfMissing = false)
-@EnableConfigurationProperties(MLLPConfig.class)
-@Slf4j
-public class HapiMLLPListener {
+/** HAPI transport owned by one saved connection, never a global Spring listener. */
+public final class HapiMLLPListener {
 
-    private final MLLPConfig config;
-    private final MessageRouter router;
-    private SimpleServer server;
-    private ExecutorService executorService;
-    private RateLimitingReceivingApplication rateLimiter;
+  private final int port;
+  private final String sourceBindingId;
+  private final MessageRouter router;
+  private final CompletableFuture<Void> bound = new CompletableFuture<>();
+  private volatile ServerSocket socket;
+  private volatile boolean stopping;
+  private SimpleServer server;
+  private DefaultHapiContext context;
+  private ExecutorService executor;
+  private HapiReceivingApplication application;
+  private RateLimitingReceivingApplication rateLimiter;
+  private boolean stopped;
 
-    /**
-     * Constructs a new HapiMLLPListener.
-     *
-     * @param config the MLLP configuration properties
-     * @param router the message router for forwarding messages
-     */
-    public HapiMLLPListener(MLLPConfig config, MessageRouter router) {
-        this.config = config;
-        this.router = router;
+  public HapiMLLPListener(int port, String sourceBindingId, MessageRouter router) {
+    if (port < 1 || port > 65535) throw new IllegalArgumentException("Invalid HL7 listen port");
+    if (sourceBindingId == null || sourceBindingId.isBlank()) {
+      throw new IllegalArgumentException("A saved-connection source binding is required");
     }
+    this.port = port;
+    this.sourceBindingId = sourceBindingId;
+    this.router = java.util.Objects.requireNonNull(router);
+  }
 
-    /**
-     * Starts the HAPI MLLP server after Spring context initialization.
-     * <p>
-     * Creates the HAPI SimpleServer with the receiving application chain:
-     * RateLimitingReceivingApplication → HapiReceivingApplication → MessageRouter
-     * </p>
-     */
-    @PostConstruct
-    public void start() {
-        log.info("Starting HAPI MLLP listener on port {}", config.getPort());
-
-        try {
-            server = new SimpleServer(config.getPort(), false);
-
-            // Create receiving application chain
-            HapiReceivingApplication receivingApp = new HapiReceivingApplication(router);
-            rateLimiter = new RateLimitingReceivingApplication(receivingApp);
-
-            // Register for all HL7 message types
-            server.registerApplication("*", "*", rateLimiter);
-
-            // Start server asynchronously (HAPI's start() blocks)
-            executorService = Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r);
-                t.setName("hapi-mllp-server");
-                t.setDaemon(false);
-                return t;
-            });
-
-            executorService.submit(() -> {
+  public synchronized void start() {
+    if (stopping) throw new IllegalStateException("Cannot restart a stopped HL7 listener instance");
+    if (isRunning()) return;
+    executor = Executors.newCachedThreadPool(Thread.ofPlatform().name("hl7-" + sourceBindingId + "-", 0).factory());
+    context = new DefaultHapiContext(executor);
+    context.setSocketFactory(
+      new StandardSocketFactory() {
+        @Override
+        public ServerSocket createServerSocket() throws IOException {
+          ServerSocket created = new ServerSocket() {
+            @Override
+            public Socket accept() throws IOException {
+              try {
+                return super.accept();
+              } catch (IOException failure) {
+                if (!isClosed() && isBound()) throw failure;
+                // HAPI retries IOExceptions until its acceptor is stopped. Closing
+                // admissions before draining must not create a hot error loop.
                 try {
-                    server.start();
-                } catch (Exception e) {
-                    log.error("HAPI MLLP server failed on port {}", config.getPort(), e);
+                  Thread.sleep(SimpleServer.SO_TIMEOUT);
+                } catch (InterruptedException interrupted) {
+                  Thread.currentThread().interrupt();
                 }
-            });
-
-            log.info("HAPI MLLP listener started on port {}", config.getPort());
-
-        } catch (Exception e) {
-            log.error("Failed to initialize HAPI MLLP listener on port {}", config.getPort(), e);
-            throw new RuntimeException("MLLP listener initialization failed", e);
-        }
-    }
-
-    /**
-     * Stops the HAPI MLLP server during Spring context shutdown.
-     */
-    @PreDestroy
-    public void stop() {
-        log.info("Stopping HAPI MLLP listener on port {}", config.getPort());
-
-        if (server != null) {
-            server.stop();
-        }
-
-        if (rateLimiter != null) {
-            rateLimiter.shutdown();
-        }
-
-        if (executorService != null) {
-            executorService.shutdown();
-            try {
-                if (!executorService.awaitTermination(30, TimeUnit.SECONDS)) {
-                    log.warn("MLLP executor did not terminate within 30s, forcing shutdown");
-                    executorService.shutdownNow();
-                    if (!executorService.awaitTermination(10, TimeUnit.SECONDS)) {
-                        log.error("MLLP executor did not terminate after forced shutdown");
-                    }
-                }
-            } catch (InterruptedException e) {
-                log.warn("Interrupted while waiting for MLLP executor shutdown");
-                executorService.shutdownNow();
-                Thread.currentThread().interrupt();
+                throw new SocketTimeoutException("Saved HL7 listener is no longer accepting");
+              }
             }
+
+            @Override
+            public void bind(SocketAddress endpoint, int backlog) throws IOException {
+              try {
+                super.bind(endpoint, backlog);
+                bound.complete(null);
+              } catch (IOException failure) {
+                bound.completeExceptionally(failure);
+                throw failure;
+              }
+            }
+          };
+          socket = created;
+          // Startup can time out before HAPI reaches socket creation.
+          if (stopping) created.close();
+          return created;
         }
-
-        log.info("HAPI MLLP listener stopped");
+      }
+    );
+    try {
+      application = new HapiReceivingApplication(router, sourceBindingId);
+      rateLimiter = new RateLimitingReceivingApplication(application);
+      server = context.newServer(port, false);
+      server.registerApplication("*", "*", rateLimiter);
+      server.start();
+      // HAPI's service-start flag precedes the asynchronous acceptor bind.
+      // Only this listener's actual bind establishes readiness.
+      bound.get(5, TimeUnit.SECONDS);
+      if (!server.isRunning()) throw new IllegalStateException("HL7 server exited during startup");
+    } catch (Exception failure) {
+      boolean interrupted = Thread.interrupted() || failure instanceof InterruptedException;
+      try {
+        stop();
+      } catch (RuntimeException cleanup) {
+        failure.addSuppressed(cleanup);
+      } finally {
+        if (interrupted) Thread.currentThread().interrupt();
+      }
+      throw new IllegalStateException("Cannot bind saved HL7 connection on port " + port, failure);
     }
+  }
 
-    /**
-     * Checks if the MLLP server is currently running.
-     *
-     * @return true if the server is running
-     */
-    public boolean isRunning() {
-        return server != null && server.isRunning();
+  public synchronized void stop() {
+    if (stopped) return;
+    stopping = true;
+    if (application != null) application.stopAccepting();
+    if (socket != null) {
+      try {
+        socket.close();
+      } catch (IOException failure) {
+        throw new IllegalStateException("Cannot close HL7 listener admissions", failure);
+      }
     }
+    try {
+      // Keep routing authority and downstream resources alive through delivery.
+      if (application != null) application.awaitDrained();
+      if (server != null) server.stopAndWait();
+      if (rateLimiter != null) rateLimiter.shutdown();
+      if (context != null) context.close();
+      if (executor != null) {
+        executor.shutdown();
+        if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+          executor.shutdownNow();
+          if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("HL7 listener threads did not terminate");
+          }
+        }
+      }
+      stopped = true;
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("Interrupted draining saved HL7 connection", interrupted);
+    }
+  }
 
-    /**
-     * Gets the port this listener is configured on.
-     *
-     * @return the listen port
-     */
-    public int getPort() {
-        return config.getPort();
-    }
+  public boolean isRunning() {
+    return (
+      !stopping && socket != null && socket.isBound() && !socket.isClosed() && server != null && server.isRunning()
+    );
+  }
+
+  public int getPort() {
+    return port;
+  }
 }

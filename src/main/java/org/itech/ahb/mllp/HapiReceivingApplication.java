@@ -21,7 +21,7 @@ import org.itech.ahb.routing.MessageRouter;
  * <ul>
  *   <li>Receives parsed HL7 messages from HAPI SimpleServer</li>
  *   <li>Extracts source IP from HAPI connection metadata</li>
- *   <li>Extracts analyzer ID from MSH-3/MSH-4 using HAPI Terser</li>
+ *   <li>Uses the saved listener binding as source authority; MSH-3/MSH-4 are diagnostic hints only</li>
  *   <li>Creates a MessageEnvelope for internal routing</li>
  *   <li>Delegates to MessageRouter for HTTP forwarding</li>
  *   <li>Returns HAPI-generated ACK/NAK responses</li>
@@ -51,14 +51,23 @@ public class HapiReceivingApplication implements ReceivingApplication<Message> {
 
     private final MessageRouter router;
     private final PipeParser pipeParser;
+    private final String sourceBindingId;
+    private final Object lifecycle = new Object();
+    private boolean accepting = true;
+    private int inFlight;
 
     /**
      * Constructs a new HapiReceivingApplication with the specified router.
      *
      * @param router the message router for forwarding messages
+     * @param sourceBindingId the saved connection binding owned by this listener
      */
-    public HapiReceivingApplication(MessageRouter router) {
+    public HapiReceivingApplication(MessageRouter router, String sourceBindingId) {
+        if (sourceBindingId == null || sourceBindingId.isBlank()) {
+            throw new IllegalArgumentException("A saved-connection source binding is required");
+        }
         this.router = router;
+        this.sourceBindingId = sourceBindingId;
         this.pipeParser = new PipeParser();
     }
 
@@ -77,6 +86,10 @@ public class HapiReceivingApplication implements ReceivingApplication<Message> {
     @Override
     public Message processMessage(Message message, Map<String, Object> metadata)
             throws ReceivingApplicationException {
+        synchronized (lifecycle) {
+            if (!accepting) throw new ReceivingApplicationException("HL7 connection is stopping");
+            inFlight++;
+        }
         try {
             // Extract connection metadata
             String sourceIp = extractSourceIp(metadata);
@@ -94,7 +107,7 @@ public class HapiReceivingApplication implements ReceivingApplication<Message> {
             MessageEnvelope envelope = MessageEnvelope.builder()
                 .protocol(Protocol.HL7)
                 .transport(Transport.MLLP)
-                .sourceId(sourceIp)
+                .sourceId(sourceBindingId)
                 .sourcePort(sourcePort)
                 .rawMessage(rawMessage)
                 .receivedAt(Instant.now())
@@ -119,6 +132,26 @@ public class HapiReceivingApplication implements ReceivingApplication<Message> {
         } catch (Exception e) {
             log.error("Error processing HL7 message", e);
             throw new ReceivingApplicationException(e);
+        } finally {
+            synchronized (lifecycle) {
+                inFlight--;
+                lifecycle.notifyAll();
+            }
+        }
+    }
+
+    void stopAccepting() {
+        synchronized (lifecycle) { accepting = false; }
+    }
+
+    void awaitDrained() throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+        synchronized (lifecycle) {
+            while (inFlight != 0) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) throw new IllegalStateException("HL7 connection still has active delivery work");
+                java.util.concurrent.TimeUnit.NANOSECONDS.timedWait(lifecycle, remaining);
+            }
         }
     }
 

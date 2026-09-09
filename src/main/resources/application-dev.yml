@@ -17,7 +17,6 @@ bridge:
     poll-interval-ms: 1000
     file-stability-timeout-ms: 500
 
-# MLLP Server Configuration (HL7 v2.x transport)
+# Permit saved HL7 server connections; listening ports come from saved values.
 org.itech.ahb.mllp:
   enabled: true
-  port: 2575

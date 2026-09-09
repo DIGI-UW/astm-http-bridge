@@ -25,6 +25,7 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
   private final FileWatcher fileWatcher;
   private final AstmConnectionListeners astmListeners;
   private final SerialConnectionListeners serialListeners;
+  private final Hl7ConnectionListeners hl7Listeners;
   private final Map<String, ActiveMaterialization> activeConnections = new ConcurrentHashMap<>();
 
   public BridgeAnalyzerConnectionRuntime(
@@ -33,22 +34,33 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
     AstmConnectionListeners astmListeners,
     SerialConnectionListeners serialListeners
   ) {
+    this(registry, fileWatcher, astmListeners, serialListeners, null);
+  }
+
+  public BridgeAnalyzerConnectionRuntime(
+    AnalyzerRuntimeRegistry registry,
+    FileWatcher fileWatcher,
+    AstmConnectionListeners astmListeners,
+    SerialConnectionListeners serialListeners,
+    Hl7ConnectionListeners hl7Listeners
+  ) {
     this.registry = registry;
     this.fileWatcher = fileWatcher;
     this.astmListeners = astmListeners;
     this.serialListeners = serialListeners;
+    this.hl7Listeners = hl7Listeners;
   }
 
   @Override
   public synchronized void activate(ObjectNode connection, ObjectNode profile) {
     String connectionId = requiredText(connection, "connectionId", "Connection ID");
+    ActiveMaterialization replacement = materialization(connection, profile);
     ActiveMaterialization previous = activeConnections.get(connectionId);
     if (previous != null) {
       deactivateMaterialization(previous);
       activeConnections.remove(connectionId);
     }
 
-    ActiveMaterialization replacement = materialization(connection, profile);
     try {
       activateMaterialization(replacement);
       activeConnections.put(connectionId, replacement);
@@ -174,6 +186,15 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
       return;
     }
 
+    if ("HL7".equals(protocol) && "TCP/IP".equals(nullableText(values, "transport"))) {
+      if (!"SERVER".equals(nullableText(values, "connectionRole"))) {
+        throw new AnalyzerConnectionException("Inbound HL7 TCP requires a saved SERVER connection");
+      }
+      if (hl7Listeners == null) throw new AnalyzerConnectionException("HL7 listener runtime is unavailable");
+      hl7Listeners.start(connectionId, sourceBindingId, requiredPort(values, "port"));
+      return;
+    }
+
     if ("RS-232".equals(nullableText(values, "transport"))) {
       if (serialListeners == null) {
         throw new AnalyzerConnectionException("Serial runtime is unavailable in this Bridge deployment");
@@ -209,6 +230,8 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
       "SERVER".equals(nullableText(values, "connectionRole"))
     ) {
       astmListeners.stop(connectionId);
+    } else if ("HL7".equals(protocol) && "TCP/IP".equals(nullableText(values, "transport"))) {
+      if (hl7Listeners != null) hl7Listeners.stop(connectionId);
     }
   }
 

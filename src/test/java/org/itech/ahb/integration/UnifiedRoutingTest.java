@@ -150,7 +150,8 @@ class UnifiedRoutingTest {
 
         astmAdapter = new ASTMBridgeAdapter(normalizer);
 
-        mllpApplication = new HapiReceivingApplication(normalizer);
+        registry.register("connection:hl7-test", analyzer("ANALYZER-APP-LAB-FAC", "HL7"));
+        mllpApplication = new HapiReceivingApplication(normalizer, "connection:hl7-test");
     }
 
     @AfterEach
@@ -343,7 +344,7 @@ class UnifiedRoutingTest {
     class MLLPHandlerTests {
 
         @Test
-        @DisplayName("MLLP HL7 message routes to /analyzer/hl7 with X-Analyzer-Id from MSH")
+        @DisplayName("MLLP HL7 message routes with the registered connection identity")
         void mllpHl7RoutesCorrectly() throws Exception {
             resetLatch();
             String hl7Message = "MSH|^~\\&|ANALYZER-APP|LAB-FAC|OPENELIS|LAB|20260205120000||ORU^R01|MSG001|P|2.5.1\r" +
@@ -362,10 +363,8 @@ class UnifiedRoutingTest {
             assertTrue(req.path().endsWith("/hl7"), "Path should end with /hl7, got: " + req.path());
             assertEquals("HL7", req.sourceProtocol());
             assertEquals("MLLP", req.sourceTransport());
-            assertEquals("192.168.1.50", req.sourceId());
-            // Analyzer ID from MSH-3/MSH-4: ANALYZER-APP-LAB-FAC
-            assertNotNull(req.analyzerId());
-            assertTrue(req.analyzerId().contains("ANALYZER-APP"), "X-Analyzer-Id should come from MSH-3");
+            assertEquals("connection:hl7-test", req.sourceId());
+            assertEquals("ANALYZER-APP-LAB-FAC", req.analyzerId(), "Identity comes from the registered connection");
         }
 
         @Test

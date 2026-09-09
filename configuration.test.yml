@@ -38,7 +38,6 @@ org:
 
       mllp:
         enabled: true
-        port: 2575
 
 server:
   port: 8443

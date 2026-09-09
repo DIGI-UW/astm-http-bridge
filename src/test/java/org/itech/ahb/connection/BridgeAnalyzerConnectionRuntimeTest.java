@@ -180,6 +180,37 @@ class BridgeAnalyzerConnectionRuntimeTest {
   }
 
   @Test
+  void activatesAndDeactivatesAnHl7ServerWithItsOwnConnectionIdentity() throws Exception {
+    AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
+    Hl7ConnectionListeners listeners = mock(Hl7ConnectionListeners.class);
+    BridgeAnalyzerConnectionRuntime runtime = new BridgeAnalyzerConnectionRuntime(
+      registry,
+      null,
+      mock(AstmConnectionListeners.class),
+      mock(SerialConnectionListeners.class),
+      listeners
+    );
+    ObjectNode profile = (ObjectNode) objectMapper.readTree(
+      java.nio.file.Files.readString(Path.of("contracts/analyzer/v1/fixtures/analyzer-profile-astm.json"))
+    );
+    profile.putObject("protocol").put("name", "HL7").put("version", "2.5.1");
+    profile.putObject("controlResultRecognition").put("mode", "NONE").put("affirmedNoControlResults", true);
+    ObjectNode connection = baseConnection(profile, "HL7 fixture bench");
+    connection.withObject("values").put("transport", "TCP/IP").put("connectionRole", "SERVER").put("port", 9123);
+
+    runtime.activate(connection, profile);
+    verify(listeners).start(
+      "00000000-0000-0000-0000-000000000042",
+      "connection:00000000-0000-0000-0000-000000000042",
+      9123
+    );
+    assertThat(registry.findAnalyzerId("connection:00000000-0000-0000-0000-000000000042")).contains("oe-42");
+    runtime.deactivate(connection, profile);
+    verify(listeners).stop("00000000-0000-0000-0000-000000000042");
+    assertThat(registry.getRegisteredAnalyzers()).isEmpty();
+  }
+
+  @Test
   void activatesAndDeactivatesAProfileDrivenRs232Connection() throws Exception {
     AnalyzerRuntimeRegistry registry = new AnalyzerRuntimeRegistry();
     AstmConnectionListeners astmListeners = mock(AstmConnectionListeners.class);
