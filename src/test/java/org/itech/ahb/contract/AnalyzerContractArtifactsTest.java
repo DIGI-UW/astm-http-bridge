@@ -275,6 +275,28 @@ class AnalyzerContractArtifactsTest {
     assertFalse(validationMessages("normalized-fhir-bundle.schema.json", withoutRawValue).isEmpty());
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = { "analyzer-raw-value", "analyzer-source-transport" })
+  @DisplayName("Observation provenance fields are singular even when a duplicate is malformed")
+  void normalizedProvenanceRejectsDuplicates(String field) throws IOException {
+    String url = "https://openelis-global.org/fhir/StructureDefinition/" + field;
+    for (boolean malformed : new boolean[] { false, true }) {
+      JsonNode invalid = fixture("normalized-known-test.fhir.json").deepCopy();
+      JsonNode observation = firstObservation(invalid);
+      com.fasterxml.jackson.databind.node.ObjectNode duplicate =
+        (com.fasterxml.jackson.databind.node.ObjectNode) findExtension(observation, url).deepCopy();
+      if (malformed) {
+        duplicate.remove("valueString");
+        duplicate.remove("valueCode");
+      }
+      ((com.fasterxml.jackson.databind.node.ArrayNode) observation.path("extension")).add(duplicate);
+      assertFalse(
+        validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty(),
+        () -> "accepted duplicate " + field + " (malformed=" + malformed + ")"
+      );
+    }
+  }
+
   @Test
   @DisplayName("normalized classification and recognition evidence cannot contradict each other")
   void normalizedClassificationAndRecognitionMustAgree() throws IOException {

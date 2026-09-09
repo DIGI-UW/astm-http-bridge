@@ -553,6 +553,18 @@
                       },
                       {
                         "contains": {
+                          "required": ["url"],
+                          "properties": {
+                            "url": {
+                              "const": "https://openelis-global.org/fhir/StructureDefinition/analyzer-raw-value"
+                            }
+                          }
+                        },
+                        "minContains": 1,
+                        "maxContains": 1
+                      },
+                      {
+                        "contains": {
                           "properties": {
                             "url": {
                               "const": "https://openelis-global.org/fhir/StructureDefinition/analyzer-source-transport"
@@ -560,6 +572,18 @@
                           },
                           "required": ["url", "valueCode"]
                         }
+                      },
+                      {
+                        "contains": {
+                          "required": ["url"],
+                          "properties": {
+                            "url": {
+                              "const": "https://openelis-global.org/fhir/StructureDefinition/analyzer-source-transport"
+                            }
+                          }
+                        },
+                        "minContains": 1,
+                        "maxContains": 1
                       },
                       {
                         "contains": {
