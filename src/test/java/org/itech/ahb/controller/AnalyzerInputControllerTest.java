@@ -99,6 +99,28 @@ class AnalyzerInputControllerTest {
   }
 
   @Test
+  void equivalentIpv6ProxyAddressesAndForwardedSourcesAreNormalized() {
+    ReflectionTestUtils.setField(controller, "trustedProxies", "2001:db8::2,2001:db8::3");
+    when(mockRequest.getRemoteAddr()).thenReturn("2001:db8:0:0:0:0:0:2");
+    assertEquals("2001:db8:0:0:0:0:0:1", controller.extractSourceIp("2001:db8::1,2001:db8:0:0:0:0:0:3", mockRequest));
+    assertEquals("2001:db8:0:0:0:0:0:2", controller.extractSourceIp("analyzer.example.org", mockRequest));
+  }
+
+  @Test
+  void directIpv6SourcesAreNormalizedWithoutTrustingForwardedHeaders() {
+    when(mockRequest.getRemoteAddr()).thenReturn("2001:DB8::1");
+    assertEquals("2001:db8:0:0:0:0:0:1", controller.extractSourceIp("192.0.2.25", mockRequest));
+  }
+
+  @Test
+  void realIpFromAnEquivalentTrustedIpv6ProxyIsNormalized() {
+    ReflectionTestUtils.setField(controller, "trustedProxies", "2001:db8::2");
+    when(mockRequest.getRemoteAddr()).thenReturn("2001:db8:0:0:0:0:0:2");
+    when(mockRequest.getHeader("X-Real-IP")).thenReturn("2001:DB8::1");
+    assertEquals("2001:db8:0:0:0:0:0:1", controller.extractSourceIp(null, mockRequest));
+  }
+
+  @Test
   void untrustedRealIpAndPortHeadersAreIgnoredWithoutForwardedFor() {
     when(mockRequest.getRemoteAddr()).thenReturn("192.0.2.20");
     when(mockRequest.getRemotePort()).thenReturn(43210);
@@ -602,7 +624,7 @@ class AnalyzerInputControllerTest {
       assertEquals("192.168.1.1", controller.extractSourceIp("192.168.1.1, 10.0.0.1", mockRequest));
 
       // IPv6
-      assertEquals("::1", controller.extractSourceIp("::1", mockRequest));
+      assertEquals("0:0:0:0:0:0:0:1", controller.extractSourceIp("::1", mockRequest));
 
       // Trimmed value
       assertEquals("192.168.1.1", controller.extractSourceIp("  192.168.1.1  ", mockRequest));

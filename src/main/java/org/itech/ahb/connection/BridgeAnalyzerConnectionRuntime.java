@@ -17,6 +17,7 @@ import org.itech.ahb.file.FileWatcher;
 import org.itech.ahb.profile.AstmResultRecordSelection;
 import org.itech.ahb.profile.ControlResultRecognition;
 import org.itech.ahb.profile.TabularResultValueSelection;
+import org.itech.ahb.util.IpLiteral;
 
 /** Materializes durable connections into the established Bridge runtime. */
 public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnectionRuntime {
@@ -276,9 +277,14 @@ public final class BridgeAnalyzerConnectionRuntime implements AnalyzerConnection
       profile.path("capabilities").path("outboundOrders").asBoolean(false) &&
       profile.path("communication").path("supports_lis_initiated").asBoolean(false)
     );
-    if (
-      "HTTP".equals(entry.getInboundTransport()) ||
-      ("TCP/IP".equals(entry.getInboundTransport()) && "CLIENT".equals(nullableText(values, "connectionRole")))
+    if ("HTTP".equals(entry.getInboundTransport())) {
+      String sourceAddress = IpLiteral.canonicalize(requiredText(values, "host", "HTTP analyzer IP address"));
+      if (sourceAddress == null) {
+        throw new AnalyzerConnectionException("HTTP analyzer host must be a literal IP address");
+      }
+      entry.setInboundSourceId(sourceAddress);
+    } else if (
+      "TCP/IP".equals(entry.getInboundTransport()) && "CLIENT".equals(nullableText(values, "connectionRole"))
     ) {
       entry.setInboundSourceId(requiredText(values, "host", "Analyzer host"));
     }

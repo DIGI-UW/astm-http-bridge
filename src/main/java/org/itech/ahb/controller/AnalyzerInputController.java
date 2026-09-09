@@ -1,13 +1,12 @@
 package org.itech.ahb.controller;
 
 import jakarta.servlet.http.HttpServletRequest;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.util.Arrays;
 import lombok.extern.slf4j.Slf4j;
 import org.itech.ahb.model.Protocol;
 import org.itech.ahb.model.Transport;
 import org.itech.ahb.normalizer.MessageEnvelope;
+import org.itech.ahb.util.IpLiteral;
 import org.itech.ahb.util.ProtocolDetector;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -187,7 +186,7 @@ public class AnalyzerInputController {
    * @return the extracted source IP address
    */
   String extractSourceIp(String xForwardedFor, HttpServletRequest request) {
-    String remoteAddr = request.getRemoteAddr();
+    String remoteAddr = IpLiteral.canonicalize(request.getRemoteAddr());
     String fallback = remoteAddr != null ? remoteAddr : "unknown";
     if (!isTrustedProxy(remoteAddr)) return fallback;
 
@@ -195,39 +194,27 @@ public class AnalyzerInputController {
       String[] ips = xForwardedFor.split(",", -1);
       String peer = remoteAddr;
       for (int index = ips.length - 1; index >= 0 && isTrustedProxy(peer); index--) {
-        String candidate = ips[index].trim();
-        if (!isIpLiteral(candidate)) return fallback;
+        String candidate = IpLiteral.canonicalize(ips[index]);
+        if (candidate == null) return fallback;
         peer = candidate;
       }
       return peer;
     }
 
-    String xRealIp = request.getHeader("X-Real-IP");
-    if (xRealIp != null && isIpLiteral(xRealIp.trim())) {
-      return xRealIp.trim();
+    String xRealIp = IpLiteral.canonicalize(request.getHeader("X-Real-IP"));
+    if (xRealIp != null) {
+      return xRealIp;
     }
 
     return fallback;
   }
 
   private boolean isTrustedProxy(String address) {
+    String canonical = IpLiteral.canonicalize(address);
     return (
-      address != null &&
-      !address.isBlank() &&
-      Arrays.stream(trustedProxies.split(",")).map(String::trim).anyMatch(address::equals)
+      canonical != null &&
+      Arrays.stream(trustedProxies.split(",")).map(IpLiteral::canonicalize).anyMatch(canonical::equals)
     );
-  }
-
-  private static boolean isIpLiteral(String address) {
-    boolean ipv4 = address.matches("[0-9]{1,3}(\\.[0-9]{1,3}){3}");
-    boolean ipv6 = address.contains(":") && address.matches("[0-9a-fA-F:.]+");
-    if (!ipv4 && !ipv6) return false;
-    try {
-      InetAddress.getByName(address);
-      return true;
-    } catch (UnknownHostException exception) {
-      return false;
-    }
   }
 
   /**

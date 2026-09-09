@@ -1,6 +1,7 @@
 package org.itech.ahb.connection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -30,6 +31,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -229,7 +233,54 @@ class HttpCsvConnectionTest {
     verifyNoInteractions(watcher);
   }
 
-  private ObjectNode activate(String analyzerId, String host) {
+  @ParameterizedTest
+  @CsvSource({ "2001:db8::1,2001:db8:0:0:0:0:0:1", "2001:db8:0:0:0:0:0:1,2001:db8::1" })
+  void equivalentIpv6SendersMatchSavedConnectionsAfterRestore(String configured, String observed) {
+    activate("oe-ipv6", configured);
+    assertThat(send(observed, null)).isEqualTo(200);
+    assertThat(received).hasSize(2);
+    reopen();
+    assertThat(send(observed, null)).isEqualTo(200);
+    assertThat(received).hasSize(4);
+
+    activate("oe-ipv6-duplicate", observed);
+    assertThat(send(observed, null)).isNotEqualTo(200);
+    assertThat(received).hasSize(4);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "analyzer.example.org", "192.0.2.25:8080", "192.0.2.999", "127.1", "2001:db8::1/64" })
+  void rejectsNonLiteralHttpHostsBeforeSavingTheConnection(String host) {
+    assertThatThrownBy(() -> create("oe-invalid-http", host))
+      .isInstanceOf(AnalyzerConnectionException.class)
+      .hasMessageContaining("IP address");
+    assertThat(registry.getRegisteredAnalyzers()).isEmpty();
+    assertThat(received).isEmpty();
+  }
+
+  @Test
+  void invalidPartialHostUpdatePreservesTheActiveHttpConnection() {
+    ObjectNode saved = activate("oe-http-update", "192.0.2.25");
+    ObjectNode update = mapper
+      .createObjectNode()
+      .put("schemaVersion", "1.0")
+      .put("requestId", "invalid-host-update")
+      .put("connectionId", saved.path("connectionId").asText())
+      .put("expectedConfigRevision", 1)
+      .put("displayName", "oe-http-update");
+    update.set("profileRef", saved.path("profileRef").deepCopy());
+    update.putObject("values").put("host", "analyzer.example.org");
+
+    assertThatThrownBy(() -> connections.update(update))
+      .isInstanceOf(AnalyzerConnectionException.class)
+      .hasMessageContaining("IP address");
+
+    reopen();
+    assertThat(send("192.0.2.25", null)).isEqualTo(200);
+    assertThat(received).hasSize(2);
+  }
+
+  private ObjectNode create(String analyzerId, String host) {
     ObjectNode request = mapper.createObjectNode();
     request
       .put("schemaVersion", "1.0")
@@ -242,7 +293,11 @@ class HttpCsvConnectionTest {
       .put("revision", 1)
       .put("fingerprint", profile.path("catalog").path("revisionFingerprint").asText());
     request.putObject("values").put("transport", "HTTP").put("host", host);
-    ObjectNode connection = connections.create(request);
+    return connections.create(request);
+  }
+
+  private ObjectNode activate(String analyzerId, String host) {
+    ObjectNode connection = create(analyzerId, host);
     assertThat(connection.path("readiness").path("ready").asBoolean()).isTrue();
     ObjectNode ack = connections.applyRuntimeCommand(command(connection, "ACTIVATE"));
     assertThat(ack.path("actualRuntimeState").asText()).isEqualTo("ACTIVE");

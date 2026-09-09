@@ -104,6 +104,7 @@ public final class AnalyzerConnectionCatalog {
 
     String connectionId = ids.get().toString();
     ObjectNode values = effectiveValues(profile, suppliedValues);
+    validateHttpSender(values);
     ObjectNode record = objectMapper.createObjectNode();
     record.put("connectionId", connectionId);
     record.put("clientAnalyzerId", clientAnalyzerId);
@@ -148,6 +149,7 @@ public final class AnalyzerConnectionCatalog {
     ObjectNode profile = requirePinnedProfile(profileRef);
     validateValues(profile, suppliedValues);
     ObjectNode values = effectiveValues(profile, suppliedValues, (ObjectNode) existing.path("values"));
+    validateHttpSender(values);
     if (sameConfiguration(existing, profileRef, displayName, values)) {
       return view(existing, profile);
     }
@@ -599,6 +601,17 @@ public final class AnalyzerConnectionCatalog {
       }
     }
     return false;
+  }
+
+  private static void validateHttpSender(ObjectNode values) {
+    String host = values.path("host").asText("");
+    if (
+      "HTTP".equals(values.path("transport").asText()) &&
+      !host.isBlank() &&
+      org.itech.ahb.util.IpLiteral.canonicalize(host) == null
+    ) {
+      throw new AnalyzerConnectionException("HTTP analyzer host must be a literal IP address");
+    }
   }
 
   private void validateValues(ObjectNode profile, ObjectNode values) {

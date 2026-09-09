@@ -301,6 +301,13 @@ address and overwrite forwarded port and real-IP headers. Do not enable generic
 servlet/container forwarded-header rewriting: keep
 `server.forward-headers-strategy=none` so Bridge can inspect the real socket peer.
 
+For HTTP connections, `host` must be a numeric IPv4 or IPv6 address, not a
+hostname, port-qualified address, network range, or scoped/interface address.
+Saved sender bindings, incoming addresses, and trusted proxy addresses use the
+same normalized representation, including equivalent IPv6 spellings. Hostnames
+are never resolved to authorize an HTTP sender. This restriction does not change
+hostname support for outbound TCP connections.
+
 ### Configuration
 
 ```yaml
