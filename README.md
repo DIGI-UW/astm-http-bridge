@@ -130,7 +130,7 @@ Runtime configuration is read from `configuration.yml` (mounted into container a
 | **Connection Catalog** | | |
 | `bridge.connection-catalog.directory` | Durable analyzer connection store | `/data/openelis-analyzer-bridge/connections` |
 | **Connectivity** | | |
-| `bridge.connectivity.advertised-host` | Bridge host that receiver analyzers should be configured to reach | Required for receiver probes |
+| `bridge.connectivity.advertised-host` | Reserved; currently unused by connection activation and receiver probes | Optional; setting it has no runtime effect |
 | **Security (M7.1)** | | |
 | `bridge.security.enabled` | Enable HTTP Basic auth on `/input` and management APIs | true |
 | `bridge.security.username` | HTTP Basic username | bridge |
