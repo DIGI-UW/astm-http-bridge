@@ -200,6 +200,30 @@
           "allOf": [
             {
               "contains": {
+                "required": ["url"],
+                "properties": { "url": { "const": "mode" } }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "required": ["url"],
+                "properties": { "url": { "const": "outcome" } }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "required": ["url"],
+                "properties": { "url": { "const": "recognitionFingerprint" } }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
                 "required": ["url", "valueCode"],
                 "properties": {
                   "url": { "const": "mode" },
@@ -353,6 +377,21 @@
     "containsDevice": {
       "properties": {
         "entry": {
+          "allOf": [
+            {
+              "contains": {
+                "required": ["resource"],
+                "properties": {
+                  "resource": {
+                    "required": ["resourceType"],
+                    "properties": { "resourceType": { "const": "Device" } }
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ],
           "contains": {
             "properties": {
               "resource": {
@@ -543,6 +582,18 @@
                         "contains": {
                           "$ref": "#/$defs/controlRecognitionExtension"
                         },
+                        "maxContains": 1
+                      },
+                      {
+                        "contains": {
+                          "required": ["url"],
+                          "properties": {
+                            "url": {
+                              "const": "https://openelis-global.org/fhir/StructureDefinition/analyzer-control-recognition"
+                            }
+                          }
+                        },
+                        "minContains": 1,
                         "maxContains": 1
                       }
                     ]

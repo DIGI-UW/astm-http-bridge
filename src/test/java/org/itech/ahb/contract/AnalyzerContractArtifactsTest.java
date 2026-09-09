@@ -350,10 +350,41 @@ class AnalyzerContractArtifactsTest {
   void controlRecognitionExtensionIsSingular() throws IOException {
     JsonNode invalid = fixture("normalized-qc.fhir.json").deepCopy();
     JsonNode observation = firstObservation(invalid);
-    ((com.fasterxml.jackson.databind.node.ArrayNode) observation.path("extension")).add(
-        findExtension(observation, CONTROL_RECOGNITION_EXTENSION).deepCopy()
-      );
+    JsonNode duplicate = findExtension(observation, CONTROL_RECOGNITION_EXTENSION).deepCopy();
+    ((com.fasterxml.jackson.databind.node.ArrayNode) observation.path("extension")).add(duplicate);
 
+    assertFalse(validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty());
+    ((com.fasterxml.jackson.databind.node.ObjectNode) duplicate).remove("extension");
+    assertFalse(validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "mode", "outcome", "recognitionFingerprint" })
+  void recognitionSummaryFieldsRejectMalformedDuplicates(String field) throws IOException {
+    JsonNode invalid = fixture("normalized-qc.fhir.json");
+    JsonNode recognition = findExtension(firstObservation(invalid), CONTROL_RECOGNITION_EXTENSION);
+    var parts = (com.fasterxml.jackson.databind.node.ArrayNode) recognition.path("extension");
+    JsonNode duplicate = findExtension(recognition, field).deepCopy();
+    parts.add(duplicate);
+    assertFalse(validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty(), field);
+    ((com.fasterxml.jackson.databind.node.ObjectNode) duplicate).remove(java.util.List.of("valueCode", "valueString"));
+    assertFalse(validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty(), field);
+  }
+
+  @Test
+  void normalizedBundleRejectsMultipleDevicesIncludingMalformedDevices() throws IOException {
+    JsonNode invalid = fixture("normalized-qc.fhir.json");
+    var entries = (com.fasterxml.jackson.databind.node.ArrayNode) invalid.path("entry");
+    JsonNode secondEntry = StreamSupport.stream(entries.spliterator(), false)
+      .filter(entry -> "Device".equals(entry.path("resource").path("resourceType").asText()))
+      .findFirst()
+      .orElseThrow()
+      .deepCopy();
+    ((com.fasterxml.jackson.databind.node.ObjectNode) secondEntry).put("fullUrl", "urn:uuid:second-device");
+    entries.add(secondEntry);
+    var second = secondEntry.path("resource");
+    assertFalse(validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty());
+    ((com.fasterxml.jackson.databind.node.ObjectNode) second).remove(java.util.List.of("identifier", "extension"));
     assertFalse(validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty());
   }
 
