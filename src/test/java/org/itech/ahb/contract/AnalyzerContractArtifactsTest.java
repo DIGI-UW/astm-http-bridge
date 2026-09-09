@@ -21,6 +21,8 @@ import java.util.stream.StreamSupport;
 import org.hl7.fhir.r4.model.Bundle;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 @DisplayName("OGC-1054 v1 analyzer contract artifacts")
 class AnalyzerContractArtifactsTest {
@@ -336,6 +338,28 @@ class AnalyzerContractArtifactsTest {
       );
 
     assertFalse(validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "ruleKey", "sourceField", "rawValue", "matched" })
+  @DisplayName("recognition evaluation fields are singular")
+  void recognitionEvaluationFieldsAreSingular(String field) throws IOException {
+    JsonNode invalid = fixture("normalized-qc.fhir.json").deepCopy();
+    JsonNode evaluation = recognitionPart(firstObservation(invalid), "evaluation");
+    com.fasterxml.jackson.databind.node.ArrayNode parts =
+      (com.fasterxml.jackson.databind.node.ArrayNode) evaluation.path("extension");
+    JsonNode duplicate = findExtension(evaluation, field).deepCopy();
+    parts.add(duplicate);
+
+    assertFalse(validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty(), field);
+
+    ((com.fasterxml.jackson.databind.node.ObjectNode) duplicate).remove(
+        java.util.List.of("valueString", "valueBoolean")
+      );
+    assertFalse(
+      validationMessages("normalized-fhir-bundle.schema.json", invalid).isEmpty(),
+      "a malformed duplicate must not evade the " + field + " cardinality check"
+    );
   }
 
   @Test

@@ -37,10 +37,8 @@ class AnalyzerProfileContractTest {
   void completeEstablishedProfilesConform() throws IOException {
     for (String fixtureName : PROFILE_FIXTURES) {
       JsonNode profile = fixture(fixtureName);
-      assertTrue(
-        PROFILE_SCHEMA.validate(profile).isEmpty(),
-        () -> fixtureName + " violates analyzer-profile.schema.json: " + PROFILE_SCHEMA.validate(profile)
-      );
+      Set<ValidationMessage> messages = PROFILE_SCHEMA.validate(profile);
+      assertTrue(messages.isEmpty(), () -> fixtureName + " violates analyzer-profile.schema.json: " + messages);
       assertSemanticProfile(profile);
     }
   }
@@ -76,7 +74,8 @@ class AnalyzerProfileContractTest {
     ObjectNode profile = fixture("analyzer-profile-astm.json").deepCopy();
     profile.remove("model");
 
-    assertTrue(PROFILE_SCHEMA.validate(profile).isEmpty(), PROFILE_SCHEMA.validate(profile).toString());
+    Set<ValidationMessage> messages = PROFILE_SCHEMA.validate(profile);
+    assertTrue(messages.isEmpty(), messages::toString);
   }
 
   @Test
@@ -91,7 +90,8 @@ class AnalyzerProfileContractTest {
     defaults.put("fileFormat", "XML");
     defaults.remove("hasHeader");
 
-    assertTrue(PROFILE_SCHEMA.validate(profile).isEmpty(), PROFILE_SCHEMA.validate(profile).toString());
+    Set<ValidationMessage> messages = PROFILE_SCHEMA.validate(profile);
+    assertTrue(messages.isEmpty(), messages::toString);
   }
 
   @Test
@@ -100,7 +100,8 @@ class AnalyzerProfileContractTest {
     ObjectNode profile = fixture("analyzer-profile-astm.json").deepCopy();
     profile.withArray("default_test_mappings").removeAll();
 
-    assertTrue(PROFILE_SCHEMA.validate(profile).isEmpty(), PROFILE_SCHEMA.validate(profile).toString());
+    Set<ValidationMessage> messages = PROFILE_SCHEMA.validate(profile);
+    assertTrue(messages.isEmpty(), messages::toString);
     assertSemanticProfile(profile);
   }
 

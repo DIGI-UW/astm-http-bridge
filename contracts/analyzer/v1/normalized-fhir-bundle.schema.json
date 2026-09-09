@@ -102,6 +102,35 @@
           "allOf": [
             {
               "contains": {
+                "required": ["url"],
+                "properties": { "url": { "const": "ruleKey" } }
+              },
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "required": ["url"],
+                "properties": { "url": { "const": "sourceField" } }
+              },
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "required": ["url"],
+                "properties": { "url": { "const": "rawValue" } }
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "required": ["url"],
+                "properties": { "url": { "const": "matched" } }
+              },
+              "maxContains": 1
+            },
+            {
+              "contains": {
                 "required": ["url", "valueString"],
                 "properties": {
                   "url": { "const": "ruleKey" },
